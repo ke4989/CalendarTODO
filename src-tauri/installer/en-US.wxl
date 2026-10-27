@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WixLocalization Culture="en-US" xmlns="http://schemas.microsoft.com/wix/2006/localization">
+<String Id="CTHeading">License terms</String>
+<String Id="CTAccept">I have read and agree to the applicable terms</String>
+<String Id="CTNext">Next</String>
+<String Id="CTCancel">Cancel</String>
+<String Id="CTRequired">Explicit agreement is required. Review the complete offline terms before using CT_ACCEPT_TERMS=1</String>
+</WixLocalization>

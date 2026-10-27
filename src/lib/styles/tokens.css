@@ -1,0 +1,289 @@
+/*
+ * Semantic token source of truth.
+ *
+ * Palette and mode are selected independently on <html>. `apply.ts` writes
+ * `data-theme-palette` and the resolved `data-color-mode`; components never
+ * branch on either value and consume only semantic tokens.
+ *
+ *   data-theme-palette="quiet-daybook"  Quiet Daybook palette
+ *   data-theme-palette="dawn-wheat"     Dawn Wheat palette
+ *   data-color-mode="light|dark"        explicit or resolved system mode
+ *
+ * Every theme defines the same token set. Components consume these tokens and
+ * never a raw palette value.
+ */
+:root {
+  color-scheme: light dark;
+
+  --font-ui: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, monospace;
+  --font-size-caption: 0.75rem;
+  --font-size-meta: 0.8125rem;
+  --font-size-body: 0.9375rem;
+  --font-size-section: 1.25rem;
+  --font-size-day: 1.75rem;
+  --line-height-tight: 1.25;
+  --line-height-body: 1.5;
+
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+
+  --radius-control: 0.5rem;
+  --radius-row: 0.625rem;
+  --radius-dialog: 1rem;
+  --radius-pill: 999px;
+
+  --duration-instant: 80ms;
+  --duration-fast: 120ms;
+  --duration-standard: 170ms;
+  --duration-panel: 220ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  --control-height: 2.75rem;
+  --hit-target-compact: 2.25rem;
+  --hit-target: 2.75rem;
+  --focus-ring: 0 0 0 3px color-mix(in srgb, var(--color-focus) 28%, transparent);
+  --color-field-idle: #f4f7f5;
+  --color-field-selected: color-mix(in srgb, var(--color-surface-soft) 90%, var(--color-text));
+  --color-field-disabled: var(--color-surface-soft);
+  --field-focus-ring: 0 0 0 2px var(--color-text-muted);
+  /*
+   * Generic warning surface used by reusable components. Themes that derive
+   * their identity from an amber family override these two values so status
+   * copy keeps a distinct hue instead of borrowing the brand accent.
+   */
+  --color-warning-surface: #f7efdd;
+  --color-warning-text: #6f5116;
+
+  font-family: var(--font-ui);
+  color: var(--color-text);
+  font-synthesis: none;
+}
+
+/* Quiet Daybook — light. Also the base layer for every theme. */
+:root,
+:root[data-theme-palette="quiet-daybook"][data-color-mode="light"] {
+  color-scheme: light;
+
+  --color-canvas: #f3f2ed;
+  --color-surface: #fbfaf6;
+  --color-surface-soft: #ecece7;
+  --color-surface-raised: #ffffff;
+  --color-text: #173c35;
+  --color-text-muted: #5b6962;
+  --color-border: #dcded8;
+  --color-border-strong: #9ca8a2;
+  --color-primary: #245e50;
+  --color-primary-hover: #1d5044;
+  --color-primary-pressed: #173f36;
+  --color-on-primary: #ffffff;
+  --color-accent: #d59b3f;
+  --color-current-time-text: #805a17;
+  --color-focus: #19745f;
+  --color-danger: #9b3438;
+  --color-danger-hover: #7e292d;
+  --color-on-danger: #ffffff;
+  --color-info-surface: #e6f0f1;
+  --color-info-text: #24545c;
+  --color-success-surface: #e4f1e9;
+  --color-success-text: #245b45;
+  --color-danger-surface: #f7e5e4;
+  --color-danger-text: #822d31;
+  --color-toast-info: #315c66;
+  --color-toast-success: #275e50;
+  --color-toast-error: #7e3034;
+  --color-on-toast: #ffffff;
+  --color-on-toast-hover: rgb(255 255 255 / 10%);
+  --color-scrim: rgb(23 38 33 / 58%);
+  --color-selection: #c9e2d7;
+  --color-field-idle: #f4f7f5;
+  --color-create-surface: #f7f5ee;
+  --color-create-field: #ffffff;
+  --color-detail-surface: #ecece7;
+  --color-detail-field: #f8faf8;
+
+
+  --shadow-widget: 0 1px 6px rgb(31 55 47 / 16%);
+  --shadow-menu: 0 12px 32px rgb(31 55 47 / 18%);
+  --shadow-dialog: 0 20px 54px rgb(31 55 47 / 24%);
+
+}
+:root[data-theme-palette="quiet-daybook"][data-color-mode="dark"] {
+  color-scheme: dark;
+
+  --color-canvas: #111815;
+  --color-surface: #1d2924;
+  --color-surface-soft: #26332d;
+  --color-surface-raised: #2b3933;
+  --color-text: #edf3ef;
+  --color-text-muted: #b6c4bd;
+  --color-border: #475a51;
+  --color-border-strong: #70827a;
+  --color-primary: #70c3a6;
+  --color-primary-hover: #88d2b8;
+  --color-primary-pressed: #5aad91;
+  --color-on-primary: #10251e;
+  --color-accent: #e0aa5c;
+  --color-current-time-text: #e0aa5c;
+  --color-focus: #79d5b4;
+  --color-danger: #ffb4b5;
+  --color-danger-hover: #ffc7c7;
+  --color-on-danger: #401114;
+  --color-info-surface: #263f43;
+  --color-info-text: #c1e6ea;
+  --color-success-surface: #244438;
+  --color-success-text: #c9f0de;
+  --color-danger-surface: #582f31;
+  --color-danger-text: #ffd2d2;
+  --color-toast-info: #315c66;
+  --color-toast-success: #275e50;
+  --color-toast-error: #7e3034;
+  --color-on-toast: #ffffff;
+  --color-on-toast-hover: rgb(255 255 255 / 10%);
+  --color-scrim: rgb(4 12 9 / 70%);
+  --color-selection: #315d4e;
+  --shadow-widget: 0 1px 6px rgb(0 0 0 / 38%);
+  --shadow-menu: 0 12px 32px rgb(0 0 0 / 38%);
+  --shadow-dialog: 0 20px 54px rgb(0 0 0 / 48%);
+  --color-field-idle: #35463f;
+  --color-create-surface: #202b26;
+  --color-create-field: #3a4b44;
+  --color-detail-surface: #26332d;
+  --color-detail-field: #3a4a43;
+}
+
+/*
+ * Dawn Wheat (晨曦麦穗) — light.
+ *
+ * Warm straw canvas, ivory surfaces and a deep coffee-brown text family. The
+ * amber brand family carries navigation, selection, focus and primary actions;
+ * the brand accent is reserved for the current-time marker. Amber is never used
+ * for success or danger, and the toast stack keeps the shared dark ink so that
+ * floating feedback does not read as a brand surface.
+ */
+:root[data-theme-palette="dawn-wheat"][data-color-mode="light"] {
+  color-scheme: light;
+
+  --color-canvas: #f9f4e7;
+  --color-surface: #fdf9f0;
+  --color-surface-soft: #f2e9d8;
+  --color-surface-raised: #fffdf7;
+  --color-text: #33291a;
+  --color-text-muted: #6a5b45;
+  --color-border: #e1d5bb;
+  --color-border-strong: #98815c;
+  --color-primary: #7d5615;
+  --color-primary-hover: #69480f;
+  --color-primary-pressed: #563a0a;
+  --color-on-primary: #fdf9f0;
+  --color-accent: #8a5c14;
+  --color-current-time-text: #8a5c14;
+  --color-focus: #84590e;
+  --color-danger: #9b3438;
+  --color-danger-hover: #822b2f;
+  --color-on-danger: #fff8f7;
+  --color-info-surface: #e9edf3;
+  --color-info-text: #2f475b;
+  --color-success-surface: #e5efe4;
+  --color-success-text: #2a5a3a;
+  --color-danger-surface: #f7e5e3;
+  --color-danger-text: #83262c;
+  --color-toast-info: #3a4a57;
+  --color-toast-success: #2f5241;
+  --color-toast-error: #7d2b30;
+  --color-on-toast: #fdf9f0;
+  --color-on-toast-hover: rgb(255 255 255 / 10%);
+  --color-scrim: rgb(43 34 20 / 56%);
+  --color-selection: rgb(184 129 28 / 24%);
+
+  /* Amber already owns the brand, so warning keeps its own olive hue. */
+  --color-warning-surface: #eef0dd;
+  --color-warning-text: #55581f;
+
+  --shadow-widget: 0 1px 6px rgb(52 41 22 / 18%);
+  --shadow-menu: 0 12px 32px rgb(52 41 22 / 18%);
+  --shadow-dialog: 0 20px 54px rgb(52 41 22 / 24%);
+  --color-field-idle: #fffaf0;
+  --color-create-surface: #f7eedc;
+  --color-create-field: #fffdf5;
+  --color-detail-surface: #f2e9d8;
+  --color-detail-field: #fffaf0;
+}
+
+/* Dawn Wheat (晨曦麦穗) — dark. A warm charcoal-brown room at night; the canvas
+ * still sits below the surface so panels keep their separation. */
+:root[data-theme-palette="dawn-wheat"][data-color-mode="dark"] {
+  color-scheme: dark;
+
+  --color-canvas: #191510;
+  --color-surface: #231d15;
+  --color-surface-soft: #2d251b;
+  --color-surface-raised: #352c21;
+  --color-text: #f4ecdc;
+  --color-text-muted: #c4b39b;
+  --color-border: #544636;
+  --color-border-strong: #8a7859;
+  --color-primary: #e8b962;
+  --color-primary-hover: #f2ca7d;
+  --color-primary-pressed: #d9a748;
+  --color-on-primary: #2a1d08;
+  --color-accent: #e8b962;
+  --color-current-time-text: #e8b962;
+  --color-focus: #f0c274;
+  --color-danger: #ffb4b2;
+  --color-danger-hover: #ffc8c6;
+  --color-on-danger: #3f1416;
+  --color-info-surface: #27323c;
+  --color-info-text: #ccdeec;
+  --color-success-surface: #24382c;
+  --color-success-text: #c9ecd5;
+  --color-danger-surface: #4d2a2b;
+  --color-danger-text: #ffd3d2;
+  --color-toast-info: #35434f;
+  --color-toast-success: #2c4c3d;
+  --color-toast-error: #6f2f33;
+  --color-on-toast: #fdf9ed;
+  --color-on-toast-hover: rgb(255 255 255 / 12%);
+  --color-scrim: rgb(6 4 2 / 72%);
+  --color-selection: rgb(232 185 98 / 30%);
+
+  --color-warning-surface: #38371f;
+  --color-warning-text: #eee0a6;
+
+  --shadow-widget: 0 1px 6px rgb(0 0 0 / 42%);
+  --shadow-menu: 0 12px 32px rgb(0 0 0 / 42%);
+  --shadow-dialog: 0 20px 54px rgb(0 0 0 / 52%);
+  --color-field-idle: #40362a;
+  --color-create-surface: #2a2116;
+  --color-create-field: #4a3a28;
+  --color-detail-surface: #2d251b;
+  --color-detail-field: #40362a;
+}
+
+/* Incremental aliases for incumbent route styles. */
+:root {
+  --bg: var(--color-canvas);
+  --surface: var(--color-surface);
+  --surface-soft: var(--color-surface-soft);
+  --text: var(--color-text);
+  --muted: var(--color-text-muted);
+  --border: var(--color-border);
+  --primary: var(--color-primary);
+  --primary-hover: var(--color-primary-hover);
+  --danger: var(--color-danger);
+  --ring: var(--color-focus);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-instant: 0ms;
+    --duration-fast: 0ms;
+    --duration-standard: 0ms;
+    --duration-panel: 0ms;
+  }
+}

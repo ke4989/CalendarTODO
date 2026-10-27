@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WixLocalization Culture="zh-CN" xmlns="http://schemas.microsoft.com/wix/2006/localization">
+<String Id="CTHeading">许可条款</String>
+<String Id="CTAccept">我已阅读并同意适用条款</String>
+<String Id="CTNext">下一步</String>
+<String Id="CTCancel">取消</String>
+<String Id="CTRequired">需要明确同意条款。使用 CT_ACCEPT_TERMS=1 前，请阅读完整的离线条款</String>
+</WixLocalization>

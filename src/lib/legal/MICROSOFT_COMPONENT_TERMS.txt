@@ -1,0 +1,109 @@
+Calendar TODO 0.1.0 — Additional conditions for Microsoft Distributable Code
+Version: 2026-10-27
+
+1. Scope and separate licenses
+
+Calendar TODO's original source code and contributions remain licensed under the
+MIT License reproduced separately. These additional conditions apply only to
+Microsoft Distributable Code included in this Windows binary distribution. They
+do not restrict Calendar TODO's original MIT-licensed contributions or change the
+licenses of other third-party components.
+
+The Windows application contains release support object code linked from MSVC's
+libcmt.lib and libvcruntime.lib (startup, exception, memory and security support).
+No original Microsoft LIB files, development tools, debug runtime, or separate
+Microsoft CRT DLLs are supplied. Where Microsoft Windows SDK distributable object
+code is incorporated in the linked output, the conditions below also apply to
+that code. Use of SDK import libraries does not mean that the complete Universal
+C Runtime or Windows operating system DLLs are included in this distribution.
+Those operating-system components are supplied and serviced by Windows under
+their own terms. Whether particular SDK import descriptors constitute SDK
+Distributable Code is not determined by this notice.
+
+The WebView2 Runtime is separately supplied by Microsoft and is not bundled,
+downloaded or installed by Calendar TODO's installers. Its own terms apply.
+The embedded WebView2 SDK static loader is separately licensed under BSD-3-Clause;
+its full license and NOTICE are in the third-party notices, not replaced here.
+
+2. Conditions for the Microsoft Distributable Code
+
+Microsoft Corporation and its suppliers retain their applicable copyrights,
+trademarks, patents and other rights. The project's MIT License does not
+relicense Microsoft Distributable Code. Subject to applicable law and the
+permissions under which that code is supplied, you agree to the following:
+
+(a) Preserve applicable Microsoft and supplier copyright, trademark and patent
+notices. Do not remove, minimize, block or alter them.
+
+(b) Do not use Microsoft's trademarks in application names or in a way that
+suggests an application comes from, is endorsed by, or is certified by Microsoft.
+Microsoft does not warrant, sponsor or certify Calendar TODO.
+
+(c) Redistribute Microsoft Distributable Code only as part of an application
+that adds significant primary functionality, within the applicable Microsoft
+redistribution permissions. Do not distribute the Microsoft code as a standalone
+development tool, original library, or separate offering under this addendum.
+Do not distribute preview, pre-release, beta or debug components under the
+release-code permissions described here.
+
+(d) Do not modify or distribute source code of Microsoft Distributable Code so
+that any part becomes subject to an Excluded License. For this purpose, an
+Excluded License requires, as a condition of use, modification or distribution,
+that the code be disclosed or distributed in source form, or that others have
+the right to modify it. This restriction concerns Microsoft code; it does not
+change the MIT permissions for Calendar TODO's own code.
+
+(e) Do not use Microsoft Distributable Code in malicious, deceptive or unlawful
+programs, or distribute it to run on a platform other than Microsoft operating
+systems, runtime technologies or application platforms, where those restrictions
+apply under its redistribution terms. Comply with applicable export laws.
+
+(f) Do not circumvent technical limitations or reverse engineer, decompile or
+disassemble Microsoft Distributable Code, except to the extent permitted by
+applicable law notwithstanding this limitation or by the applicable third-party
+license. This does not restrict inspection, modification or reverse engineering
+of Calendar TODO's own MIT-licensed code.
+
+3. Downstream distribution and agreement
+
+If you redistribute binaries containing Microsoft Distributable Code, preserve
+these component-specific conditions and applicable notices with the copies.
+You must require your distributors and external end users to agree to terms
+that protect the Microsoft Distributable Code at least as much as the applicable
+Microsoft terms. Provide the full terms before obtaining agreement. Passing
+through this file alone is not a representation that agreement has occurred.
+
+Calendar TODO's interactive installer asks for explicit agreement before
+installation. For unattended installation, the deployer must review the complete
+terms and explicitly pass the documented acceptance parameter. Silent mode is
+not agreement. These actions concern the applicable binary-distribution terms;
+they do not narrow the project's MIT source license.
+
+A distributor who merely copies or mirrors an installer may never run it.
+Before exercising redistribution permissions for the Microsoft code, that
+distributor must review and agree to the applicable conditions and provide the
+same notice and agreement arrangements to downstream recipients. Installer
+acceptance by an end user is not acceptance on behalf of a separate distributor.
+
+4. No additional Microsoft rights or approval
+
+These conditions do not supply Microsoft development tools or grant rights
+beyond the applicable component permissions. Microsoft provides no warranty or
+support for Calendar TODO through this project. No statement here establishes
+Microsoft's legal approval of this addendum or waives mandatory statutory rights.
+The other licenses reproduced with the application remain in force independently.
+
+The scope and recipient-protection requirements above are based on Visual Studio
+Community 2022 section 4 and, where applicable, the Windows SDK redistribution
+terms. Component-specific presentation follows the structure used by CPython's
+PC/crtlicense.txt; CPython's terms are not copied as a license for Calendar TODO.
+The sufficiency of a particular protective clause set under 'at least as much'
+and the legal effectiveness of agreement for non-installing downstream mirrors
+remain interpretation questions; this project does not assert that a checkbox
+or this notice alone resolves them.
+
+References (the complete applicable text above is available offline):
+https://visualstudio.microsoft.com/license-terms/vs2022-ga-community/
+https://learn.microsoft.com/visualstudio/releases/2022/redistribution
+https://learn.microsoft.com/en-us/legal/windows-sdk/redist
+https://github.com/python/cpython/blob/main/PC/crtlicense.txt

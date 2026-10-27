@@ -1,0 +1,72 @@
+[package]
+name = "calendar-todo"
+version = "0.1.0"
+description = "Calendar TODO Windows companion"
+license = "MIT"
+publish = false
+edition = "2024"
+default-run = "calendar-todo"
+autobins = false
+
+[[bin]]
+name = "calendar-todo"
+path = "src/main.rs"
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "calendar_todo_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = []
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+semver = "1"
+rusqlite = { version = "0.40.2", features = ["backup", "bundled"] }
+rusqlite_migration = "2.6.0"
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+zeroize = "1"
+quick-xml = "0.42.0"
+url = "2"
+base64 = "0.23.1"
+jiff = "0.2.37"
+reqwest = { version = "0.13.5", default-features = false, features = [
+  "blocking",
+  "rustls",
+] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = ["Data_Xml_Dom", "Foundation", "UI_Notifications"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Security",
+    "Win32_Security_Credentials",
+    "Win32_Storage_FileSystem",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_System_Console",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+
+
+# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

@@ -1,0 +1,105 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Calendar TODO",
+  "mainBinaryName": "calendar-todo",
+  "version": "0.1.0",
+  "identifier": "com.calendartodo.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Calendar TODO",
+        "create": false,
+        "width": 1280,
+        "height": 760,
+        "minWidth": 1120,
+        "minHeight": 700,
+        "decorations": false,
+        "transparent": true,
+        "resizable": true,
+        "skipTaskbar": false,
+        "alwaysOnTop": false,
+        "visible": false
+      },
+      {
+        "label": "desktop",
+        "create": false,
+        "title": "桌面清单",
+        "url": "/desktop",
+        "width": 400,
+        "height": 560,
+        "minWidth": 320,
+        "minHeight": 60,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "resizable": true,
+        "skipTaskbar": true,
+        "alwaysOnTop": false,
+        "visible": false
+      },
+      {
+        "label": "tray_menu",
+        "create": false,
+        "title": "Calendar TODO 菜单",
+        "url": "/tray-menu",
+        "width": 216,
+        "height": 330,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "resizable": false,
+        "skipTaskbar": true,
+        "alwaysOnTop": true,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "skip"
+      },
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "template": "installer/installer.nsi",
+        "languages": [
+          "English",
+          "SimpChinese"
+        ],
+        "displayLanguageSelector": true
+      },
+      "wix": {
+        "template": "installer/main.wxs",
+        "upgradeCode": "c47ac17f-b6d6-5dc9-a48f-2a92efd737b4",
+        "language": {
+          "en-US": {
+            "localePath": "installer/en-US.wxl"
+          },
+          "zh-CN": {
+            "localePath": "installer/zh-CN.wxl"
+          }
+        }
+      }
+    },
+    "licenseFile": "installer/LICENSES.rtf"
+  }
+}
