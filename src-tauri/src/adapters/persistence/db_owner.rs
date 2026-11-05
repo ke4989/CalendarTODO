@@ -26,17 +26,7 @@ pub enum OwnerDetail {
     AccessDenied,
     OtherUnavailable,
 }
-impl OwnerError {
-    pub(super) fn detail(self) -> OwnerDetail {
-        match self {
-            Self::Busy => OwnerDetail::SharingOrLockContended,
-            Self::Missing => OwnerDetail::PathUnavailable,
-            Self::UnsafeIdentity => OwnerDetail::UnsafePath,
-            Self::AccessDenied => OwnerDetail::AccessDenied,
-            Self::Unavailable | Self::DestinationExists => OwnerDetail::OtherUnavailable,
-        }
-    }
-}
+impl OwnerError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -86,29 +76,12 @@ impl OwnerError {
     }
 }
 impl OwnerFailure {
-    pub(super) fn diagnostic_parent_access(self) -> Option<ParentAccessRequests> {
-        (self.diagnostic_fallback() == Some(LockFallbackObservation::ExistingLockAbsent))
-            .then_some(self.parent_access_requests)
-            .flatten()
-    }
     pub(super) fn diagnostic_fallback(self) -> Option<LockFallbackObservation> {
         if self.kind == OwnerError::AccessDenied && self.step == OwnerStep::LockFileAcquire {
             self.fallback_detail
         } else {
             None
         }
-    }
-    pub(super) fn detail(self) -> OwnerDetail {
-        self.kind.detail()
-    }
-    pub(super) fn diagnostic_step(self) -> Option<OwnerStep> {
-        matches!(
-            self.detail(),
-            OwnerDetail::AccessDenied
-                | OwnerDetail::OtherUnavailable
-                | OwnerDetail::PathUnavailable
-        )
-        .then_some(self.step)
     }
 }
 
@@ -124,23 +97,6 @@ impl DatabaseOwner {
     }
     pub(super) fn acquire_vacant(path: &Path) -> Result<Self, OwnerFailure> {
         Self::acquire_mode(path, OpenMode::Vacant)
-    }
-    pub(super) fn acquire_existing_read_only(path: &Path) -> Result<Self, OwnerFailure> {
-        Self::acquire_mode(path, OpenMode::ExistingReadOnly)
-    }
-    pub(super) fn acquire_existing_read_only_for_configuration(
-        path: &Path,
-        cancelled: &dyn Fn() -> bool,
-    ) -> Result<Self, OwnerFailure> {
-        #[cfg(windows)]
-        {
-            native::acquire_inner(path, OpenMode::ExistingReadOnly, Some(cancelled))
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = cancelled;
-            Self::acquire_existing_read_only(path)
-        }
     }
     fn acquire_mode(path: &Path, mode: OpenMode) -> Result<Self, OwnerFailure> {
         if path == Path::new(":memory:") {
@@ -173,6 +129,11 @@ enum OpenMode {
     Actor,
     Vacant,
     ExistingReadOnly,
+}
+impl OpenMode {
+    fn read_only(self) -> bool {
+        !matches!(self, Self::Actor | Self::Vacant)
+    }
 }
 
 #[cfg(windows)]
@@ -534,19 +495,23 @@ mod native {
                 identity: directory_identity(pin),
             })
         });
-        let lock = access_denied_fallback(
-            || {
-                OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create(true)
-                    .share_mode(0)
-                    .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-                    .open(&lock_path)
-                    .map_err(|e| failure(e, OwnerStep::LockFileAcquire))
-            },
-            || readonly_existing_lock(&lock_path),
-        );
+        let lock = if mode.read_only() && mode != OpenMode::ExistingReadOnly {
+            readonly_existing_lock(&lock_path)
+        } else {
+            access_denied_fallback(
+                || {
+                    OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create(true)
+                        .share_mode(0)
+                        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                        .open(&lock_path)
+                        .map_err(|e| failure(e, OwnerStep::LockFileAcquire))
+                },
+                || readonly_existing_lock(&lock_path),
+            )
+        };
         let lock = match lock {
             Ok(lock) => lock,
             Err(primary) => {
@@ -579,8 +544,8 @@ mod native {
         let mut options = OpenOptions::new();
         options
             .read(true)
-            .write(mode != OpenMode::ExistingReadOnly)
-            .share_mode(if mode == OpenMode::ExistingReadOnly {
+            .write(!mode.read_only())
+            .share_mode(if mode.read_only() {
                 FILE_SHARE_READ
             } else {
                 FILE_SHARE_READ | FILE_SHARE_WRITE

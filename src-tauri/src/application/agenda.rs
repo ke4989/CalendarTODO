@@ -27,6 +27,14 @@ impl AgendaService {
             .list_calendar_agenda_items_in_display_window(now_utc_ms)?)
     }
 
+    pub fn search_items(
+        &self,
+        query: crate::domain::search::SearchQuery,
+    ) -> Result<crate::domain::search::SearchResults, AgendaServiceError> {
+        crate::domain::search::terms(&query).map_err(|_| AgendaServiceError::InvalidSearchQuery)?;
+        Ok(self.database.search_items(query)?)
+    }
+
     pub fn list_calendar_settings(&self) -> Result<Vec<CalendarSettingsView>, AgendaServiceError> {
         Ok(self.database.list_calendar_settings()?)
     }
@@ -156,6 +164,8 @@ impl AgendaService {
 
 #[derive(Debug, Error)]
 pub enum AgendaServiceError {
+    #[error("search query exceeds the supported bounds")]
+    InvalidSearchQuery,
     #[error(transparent)]
     Validation(#[from] CalendarEventError),
     #[error(transparent)]

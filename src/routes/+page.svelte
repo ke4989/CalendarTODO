@@ -22,9 +22,11 @@
   import RecurrenceSelector from "$lib/components/RecurrenceSelector.svelte";
   import { copyRecurrenceOptions, defaultRecurrenceOptions, recurrenceChanged, recurrenceInput } from "$lib/ui/recurrence";
   import { controlText, resolveLanguage, setActiveLanguage, translate, withoutTerminalPunctuation, type MessageKey } from "$lib/i18n";
-  import { applyRemoteDraft, draftRequest, initialDraft, selectedBase, retryBackgroundRemoteWrite, startBackgroundRemoteWrite, utcInput, projectionCandidate, preparationHint, type PreparationState, type RemoteDraft } from "$lib/ui/remote-crud-preparation";
+  import { applyRemoteDraft, draftRequest, initialDraft, selectedBase, resolveBackgroundConflict, retryBackgroundRemoteWrite, startBackgroundRemoteWrite, utcInput, projectionCandidate, preparationHint, type PreparationState, type RemoteDraft } from "$lib/ui/remote-crud-preparation";
   import { applyTheme } from "$lib/theme/apply";
-  import { confirmedRemoteEvent, listenConfirmedEvent, prepareRemoteCrud } from "$lib/ipc/client";
+  import { confirmedRemoteEvent, listenConfirmedEvent, getCalendarDisplaySelection, setCalendarDisplaySelection, calendarDisplaySelectionEvent } from "$lib/ipc/client";
+  import SearchWorkspace from "$lib/components/SearchWorkspace.svelte";
+  import { searchWorkspaceDetail, searchRemoteDetail, type SearchSummary } from "$lib/ipc/search-workspace";
   import { fitOneLine } from "$lib/ui/fit-one-line";
   import { remoteCalendarBlockedReason } from "$lib/ui/remote-calendar-availability";
   import { startReorderAutoScroll, type DragPoint } from "$lib/ui/reorder-auto-scroll";
@@ -40,7 +42,7 @@
     attachAccountSource, deleteLocalCalendar, deleteLocalTodo, deleteLocalTodoOccurrence, discoverRemoteCalendars, getBootstrapState, restoreRecentlyDeletedTodo, restoreRecentlyDeletedTodoOccurrence, setLocalCalendarHidden,
     checkForUpdate, clearErrorLog, enrollAccountCredential, getAppSettings, getAppVersion, getDesktopItemOrder, getRemoteMutationView, openLatestRelease, openProductRepository, readErrorLog, recordUiError, resetDesktopItemOrder, setDesktopItemOrder, listAccountProfiles, listAccountSyncStates, listAttachmentStates, listCalendarAgendaItems, listCalendarSettings, listLocalCalendars, listLocalTodos, purgeExpiredRemoteCache, registerAccountProfile, removeAccountProfile, resolveRemoteMutationConflict, saveLocalCalendar, saveLocalTodo, setAccountProfileEnabled, setAccountRemoteEditingEnabled, setCalendarColorOverride, setCalendarDisplayRange, setCalendarVisible, setCalendarCompleted, setCalendarImportant, setLocalTodoCompleted, triggerAccountSync, updateAppSettings, updateCalendarLocalMetadata
   } from "$lib/ipc/client";
-  import type { AgendaRefreshNotice, AppLanguage, AppSettings, AttachmentView, BootstrapState, CalendarAgendaItem, CalendarCompletionChanged, CalendarSettingsView, ColorMode, ConflictResolutionChoice, IpcError, LocalCalendar, LocalTodo, LocalTodoCompletionChanged, MutationApplicationView, Priority, RecurrenceFrequency, RecurrenceOptions, RuntimeAccountProfile, SyncExecutionView, ThemePalette, WindowMode } from "$lib/ipc/contracts";
+  import type { CalendarDisplaySelection, AgendaRefreshNotice, AppLanguage, AppSettings, AttachmentView, BootstrapState, CalendarAgendaItem, CalendarCompletionChanged, CalendarSettingsView, ColorMode, ConflictResolutionChoice, IpcError, LocalCalendar, LocalTodo, LocalTodoCompletionChanged, MutationApplicationView, Priority, RecurrenceFrequency, RecurrenceOptions, RuntimeAccountProfile, SyncExecutionView, ThemePalette, WindowMode } from "$lib/ipc/contracts";
 
   let bootstrap = $state<BootstrapState | null>(null);
   let todos = $state<LocalTodo[]>([]);
@@ -78,7 +80,7 @@
   }
   function showActionFailure(action: "saveAction" | "deleteAction", reason: string) { void reportActionFailure(action, "localSave", reason); }
   onDestroy(() => { backgroundStops.forEach((stop) => stop()); if (actionToastTimer) clearTimeout(actionToastTimer); detailSessions.forEach((session) => session.saver.dispose()); });
-  function remoteBlockedReason(calendar: CalendarSettingsView | undefined, item?: CalendarAgendaItem) { return item && item.pendingRemote?.kind === "updateEventV3" && item.pendingRemote.status !== "conflict" ? remoteCalendarBlockedReason(calendar, attachmentStates) : remoteCalendarBlockedReason(calendar, attachmentStates, item); }
+  function remoteBlockedReason(calendar: CalendarSettingsView | undefined, item?: CalendarAgendaItem) { return item && item.pendingRemote?.kind === "updateEventV3" && item.pendingRemote.status !== "conflict" && item.pendingRemote.status !== "recoveryNeeded" ? remoteCalendarBlockedReason(calendar, attachmentStates) : remoteCalendarBlockedReason(calendar, attachmentStates, item); }
   function editorDraft(item: CalendarAgendaItem | undefined, values: { title: string; notes: string; location: string; start: string; end: string }): RemoteDraft {
     const start = fromLocalInput(values.start), end = fromLocalInput(values.end);
     return { ...initialDraft(item), title: values.title, selectTitle: !item || values.title !== item.title, description: values.notes, descriptionAction: !item || values.notes !== (item.notes ?? "") ? values.notes.trim() ? "set" : "clear" : "retain", location: values.location, locationAction: !item || values.location !== (item.location ?? "") ? values.location.trim() ? "set" : "clear" : "retain", selectTime: !item || start !== item.startAtUtcMs || end !== item.endAtUtcMs, start: utcInput(start), end: utcInput(end) };
@@ -109,13 +111,17 @@
     void refreshCalendar();
     return { ...result, terminalFailed, terminalComplete: completed };
   }
-  async function keepPendingRemote(item: CalendarAgendaItem) {
+  async function resolveDetailConflict(item: CalendarAgendaItem, choice: ConflictResolutionChoice) {
     const pending = item.pendingRemote;
     if (!pending || pending.status !== "conflict" || busyIds.has(pending.operationId)) return;
-    markBusy(pending.operationId,true);
-    try { await prepareRemoteCrud({action:"resolveConflict",input:{operationId:pending.operationId,kind:pending.kind,choice:"keepRemote"}}); await refreshCalendar(); }
-    catch (failure) { void reportActionFailure("deleteAction","remoteConflictResolution",diagnosticFrom(failure)); }
-    finally { markBusy(pending.operationId,false); }
+    markBusy(pending.operationId, true);
+    try {
+      const retry = await resolveBackgroundConflict({ kind: pending.kind, operationId: pending.operationId, accountId: pending.accountId, calendarId: item.calendarId, resourceId: item.resourceId }, choice, confirmedRemoteEvent);
+      if (retry) await retryPendingRemote({ ...item, pendingRemote: { ...pending, operationId: retry.operationId, status: "retryNeeded" } });
+      await refreshCalendar();
+      if (!retry) showActionToast(controlText(language, "remoteVersionKept"), "success");
+    } catch (failure) { void reportActionFailure("saveAction", "remoteConflictResolution", diagnosticFrom(failure)); }
+    finally { markBusy(pending.operationId, false); }
   }
   async function retryPendingRemote(item: CalendarAgendaItem) {
     const pending = item.pendingRemote;
@@ -177,6 +183,7 @@
       }
       const accepted = { ...applyRemoteDraft(item, draft), important: values.important, tags: tagNames.map((name) => ({ tagId: name, name })), recurrence };
       if (session) session.calendar = accepted;
+      if (selectedSearchEntry?.kind === "calendar" && selectedSearchEntry.item.resourceId === item.resourceId && selectedSearchEntry.item.recurrenceKey === item.recurrenceKey) selectedSearchEntry = { kind: "calendar", item: accepted, key: calendarEntryKey(accepted) };
       if (current()) {
         submittedCalendar = accepted;
         if (closeAfter) detailEditing = false;
@@ -187,6 +194,7 @@
     const saved = await persistMetadata();
     const accepted = { ...item, important: values.important, tags: tagNames.map((name) => ({ tagId: name, name })), recurrence };
     if (saved && session) session.calendar = accepted;
+    if (saved && selectedSearchEntry?.kind === "calendar" && selectedSearchEntry.item.resourceId === item.resourceId && selectedSearchEntry.item.recurrenceKey === item.recurrenceKey) selectedSearchEntry = { kind: "calendar", item: accepted, key: calendarEntryKey(accepted) };
     if (saved && current()) {
       submittedCalendar = accepted;
       if (closeAfter) detailEditing = false;
@@ -225,7 +233,27 @@
   let mutationViews = $state<Map<string, MutationApplicationView>>(new Map());
   let discoveringIds = $state<Set<string>>(new Set());
   let syncingIds = $state<Set<string>>(new Set());
-  let currentView = $state<"agenda" | "settings">("agenda");
+  let currentView = $state<"agenda" | "settings" | "search">("agenda");
+  let searchWorkspace = $state<SearchWorkspace>();
+  let searchDetailRevision = 0;
+  let remoteSearchDetail = $state<SearchSummary | null>(null);
+  async function openSearchSummary(summary: SearchSummary) {
+    if (!leaveDetail()) return;
+    const revision = ++searchDetailRevision;
+    try {
+      if(summary.identity.kind === "remoteOnly") {
+        const detail=await searchRemoteDetail(summary.identity.sessionId);
+        if(revision!==searchDetailRevision || currentView!=="search" || !leaveDetail())return;
+        detailEditing=false;detailModal=null;remoteSearchDetail=detail;return;
+      }
+      const hit = await searchWorkspaceDetail(summary.identity);
+      if (revision !== searchDetailRevision || currentView !== "search") return;
+      if (!leaveDetail()) return;
+      remoteSearchDetail=null;
+      selectedSearchEntry = hit.kind === "todo" ? { ...hit, key: todoEntryKey(hit.item) } : { ...hit, key: calendarEntryKey(hit.item) };
+      if (hit.kind === "todo") openTodoModal(hit.item); else openCalendarModal(hit.item);
+    } catch(error) { if (revision === searchDetailRevision && currentView === "search") await reportFailure("search-detail",error,translate(language,"searchFailed")); }
+  }
   let settingsTab = $state<"general" | "calendars" | "desktop" | "about">("general");
   const settingsTabs = ["general", "calendars", "desktop", "about"] as const;
   let selectedSettingsAccountId = $state("local");
@@ -356,13 +384,27 @@
   let railHoverKey = $state("");
   const railOpen = $derived(railPinnedOpen || railHoverOpen);
   let hiddenCalendarFilters = $state<Set<string>>(new Set());
+  let calendarSelectionReady = $state(false);
+  let confirmedCalendarFilters = new Set<string>();
+  let calendarSelectionRevision = 0;
+  let savingCalendarSelection = false;
+  let calendarSelectionDisposed = false;
+  let calendarSelectionVersion = -1;
+  function applyCalendarSelection(snapshot: CalendarDisplaySelection) {
+    if (snapshot.version <= calendarSelectionVersion) return;
+    calendarSelectionVersion = snapshot.version;
+    confirmedCalendarFilters = new Set(snapshot.hiddenCalendarIds);
+    if (!savingCalendarSelection) hiddenCalendarFilters = new Set(confirmedCalendarFilters);
+    calendarSelectionReady = true;
+  }
   let selectedTodoId = $state<string | null>(null);
   let selectedTodoOccurrenceKey = $state<string | null>(null);
   let selectedCalendarKey = $state<string | null>(null);
   let selectedCalendarResourceId = $state<string | null>(null);
+  let selectedSearchEntry = $state<AgendaEntry | null>(null);
   let createTitleInput = $state<HTMLInputElement>();
-  const selectedTodo = $derived(detailEditing && submittedTodo ? submittedTodo : todos.find((item) => item.todoId === selectedTodoId && item.occurrenceKey === selectedTodoOccurrenceKey) ?? null);
-  const selectedCalendar = $derived(detailEditing && submittedCalendar ? submittedCalendar : calendarItems.find((item) => item.resourceId === selectedCalendarResourceId && `${item.seriesId}:${item.recurrenceKey}` === selectedCalendarKey) ?? null);
+  const selectedTodo = $derived(detailEditing && submittedTodo ? submittedTodo : todos.find((item) => item.todoId === selectedTodoId && item.occurrenceKey === selectedTodoOccurrenceKey) ?? (selectedSearchEntry ? [selectedSearchEntry] : []).find((entry) => entry.kind === "todo" && entry.item.todoId === selectedTodoId && entry.item.occurrenceKey === selectedTodoOccurrenceKey)?.item as LocalTodo ?? null);
+  const selectedCalendar = $derived(detailEditing && submittedCalendar ? submittedCalendar : calendarItems.find((item) => item.resourceId === selectedCalendarResourceId && `${item.seriesId}:${item.recurrenceKey}` === selectedCalendarKey) ?? (selectedSearchEntry ? [selectedSearchEntry] : []).find((entry) => entry.kind === "calendar" && entry.item.resourceId === selectedCalendarResourceId && `${entry.item.seriesId}:${entry.item.recurrenceKey}` === selectedCalendarKey)?.item as CalendarAgendaItem ?? null);
   type AgendaEntry = { key: string; kind: "calendar"; item: CalendarAgendaItem } | { key: string; kind: "todo"; item: LocalTodo };
   const todoEntryKey = (item: LocalTodo) => `todo:${item.todoId}:${item.occurrenceKey}`;
   const calendarEntryKey = (item: CalendarAgendaItem) => `calendar:${item.seriesId}:${item.recurrenceKey}`;
@@ -422,8 +464,8 @@
   let errorMessage = $state("");
   let errorLogAvailable = $state(false);
   type UndoDeletion =
-    | { kind: "local"; id: string; title: string }
-    | { kind: "localOccurrence"; id: string; occurrenceKey: string; title: string }
+    | { kind: "local"; id: string; title: string; calendarId: string }
+    | { kind: "localOccurrence"; id: string; occurrenceKey: string; title: string; calendarId: string }
     | { kind: "remote"; id: string; title: string; item: CalendarAgendaItem; calendar: CalendarSettingsView };
   let undoItems = $state<UndoEntry<UndoDeletion>[]>([]);
   const undoQueue = new DeletionUndoQueue<UndoDeletion>((entries) => undoItems = entries, (item) => {
@@ -501,8 +543,17 @@
     void listen<MutationApplicationView>("calendar-todo://remote-mutation-application", (event) => {
       mutationViews = new Map(mutationViews).set(event.payload.accountId, event.payload);
     }).then((stop) => { if (disposed) stop(); else unlistenMutations = stop; });
+    let unlistenCalendarSelection: (() => void) | undefined;
+    void listen<CalendarDisplaySelection>(calendarDisplaySelectionEvent, (event) => {
+      if (!disposed) applyCalendarSelection(event.payload);
+    }).then(async (stop) => {
+      if (disposed) { stop(); return; }
+      unlistenCalendarSelection = stop;
+      const snapshot = await getCalendarDisplaySelection();
+      if (!disposed) applyCalendarSelection(snapshot);
+    }).catch((error) => { if (!disposed) void reportFailure("calendar-display-selection", error, translate(language, "updateFailedRetry")); });
     void load();
-    return () => { cancelReorder(); disposed = true; clearTimeout(updateTimer); clearInterval(clockTimer); unlisten?.(); unlistenSync?.(); unlistenAttachment?.(); unlistenLocal?.(); unlistenSettings?.(); unlistenSource?.(); unlistenSourceRequired?.(); unlistenAgendaData?.(); unlistenMutations?.(); };
+    return () => { cancelReorder(); disposed = true; calendarSelectionDisposed = true; unlistenCalendarSelection?.(); clearTimeout(updateTimer); clearInterval(clockTimer); unlisten?.(); unlistenSync?.(); unlistenAttachment?.(); unlistenLocal?.(); unlistenSettings?.(); unlistenSource?.(); unlistenSourceRequired?.(); unlistenAgendaData?.(); unlistenMutations?.(); };
   });
 
   async function load() {
@@ -521,12 +572,46 @@
     finally { loading = false; }
   }
 
-  async function refresh() { todos = await listLocalTodos(); }
-  async function refreshLocalCalendars() { localCalendars = await listLocalCalendars(); if (!createCalendarId || localCalendars.find((calendar) => calendar.calendarId === createCalendarId)?.hidden) createCalendarId = visibleLocalCalendars[0]?.calendarId ?? ""; }
+  let localReadRevision = 0;
+  let localCalendarReadRevision = 0;
+  async function refresh() { const revision = ++localReadRevision; const loaded = await listLocalTodos(); if (revision === localReadRevision) todos = loaded; }
+  async function refreshLocalCalendars() {
+    const revision = ++localCalendarReadRevision;
+    const loaded = await listLocalCalendars();
+    if (revision !== localCalendarReadRevision) return;
+    localCalendars = loaded;
+    const valid = new Set(localCalendars.map((calendar) => calendar.calendarId));
+    undoQueue.removeWhere((item) => item.kind !== "remote" && !valid.has(item.calendarId));
+    if (selectedSettingsAccountId === "local" && selectedSettingsCalendarId && !valid.has(selectedSettingsCalendarId)) selectedSettingsCalendarId = null;
+    for (const [identity, session] of detailSessions) {
+      const todo = session.todo ?? session.saver.snapshot?.todo;
+      if (todo && !valid.has(todo.calendarId)) {
+        session.saver.reset(); session.saver.dispose(); detailSessions.delete(identity);
+        if (activeDetailIdentity === identity) { activeDetailIdentity = null; detailSaving = false; submittedTodo = null; detailEditing = false; detailModal = null; }
+      }
+    }
+    if (detailModal === "todo" && selectedTodo && !valid.has(selectedTodo.calendarId)) { cancelQueuedDetailSave(); detailModal = null; detailEditing = false; selectedTodoId = null; selectedTodoOccurrenceKey = null; }
+    if (selectedSearchEntry?.kind === "todo" && !valid.has(selectedSearchEntry.item.calendarId)) selectedSearchEntry = null;
+    if (!visibleLocalCalendars.some((calendar) => calendar.calendarId === createCalendarId) && !remoteDestinations.some((calendar) => calendar.calendarId === createCalendarId)) createCalendarId = preferredCreateCalendarId();
+    if (!valid.has(editCalendarId) && !calendarSettings.some((calendar) => calendar.calendarId === editCalendarId)) editCalendarId = preferredCreateCalendarId();
+  }
   async function persistLocalCalendar(calendar: LocalCalendar, name = calendar.name, color = calendar.color, displayPastDays = calendar.displayPastDays, displayFutureDays = calendar.displayFutureDays) { try { await saveLocalCalendar({ calendarId: calendar.calendarId, name, color, displayPastDays, displayFutureDays }); await Promise.all([refreshLocalCalendars(), refresh()]); } catch (error) { await reportFailure("save-local-calendar", error, translate(language, "localCalendarSaveFailed")); } }
   async function addLocalCalendar() { if (!newLocalCalendarName.trim()) return; try { const created = await saveLocalCalendar({ calendarId: null, name: newLocalCalendarName, color: newLocalCalendarColor, displayPastDays: null, displayFutureDays: null }); newLocalCalendarName = ""; await refreshLocalCalendars(); createCalendarId = created.calendarId; } catch (error) { await reportFailure("create-local-calendar", error, translate(language, "localCalendarCreateFailed")); } }
   async function toggleLocalCalendarHidden(calendar: LocalCalendar, hidden: boolean) { try { await setLocalCalendarHidden({ calendarId: calendar.calendarId, hidden }); await Promise.all([refreshLocalCalendars(), refresh()]); } catch (error) { await refreshLocalCalendars(); await reportFailure("toggle-local-calendar", error, translate(language, "localCalendarVisibilityFailed")); } }
-  async function removeLocalCalendar(calendar: LocalCalendar) { if (!window.confirm(text("confirmDeleteLocalCalendar", { name: calendar.name }))) return; try { const result = await deleteLocalCalendar({ calendarId: calendar.calendarId }); await Promise.all([refreshLocalCalendars(), refresh()]); showActionToast(result.movedTodos ? text("localCalendarDeletedMoved", { count: result.movedTodos }) : translate(language, "localCalendarDeleted"), "success"); } catch (error) { await reportFailure("delete-local-calendar", error, translate(language, "localCalendarDeleteFailed")); } }
+  let deletingLocalCalendar = $state<LocalCalendar | null>(null);
+  let localCalendarDeleteBusy = $state(false);
+  async function removeLocalCalendar() {
+    const calendar = deletingLocalCalendar;
+    if (!calendar || localCalendarDeleteBusy) return;
+    localCalendarDeleteBusy = true;
+    try {
+      await deleteLocalCalendar({ calendarId: calendar.calendarId, confirmation: "confirmed" });
+      deletingLocalCalendar = null;
+      await Promise.all([refreshLocalCalendars(), refresh(), refreshOrder(), getAppSettings().then((value) => { settings = value; settingsDefaultCalendarId = value.defaultCalendarId ?? ""; })]);
+      showActionToast(translate(language, "localCalendarDeleted"), "success");
+    } catch (error) { await reportFailure("delete-local-calendar", error, translate(language, "localCalendarDeleteFailed")); }
+    finally { localCalendarDeleteBusy = false; }
+  }
   function remoteDeleteKey(item: CalendarAgendaItem): string { return `${item.seriesId}:${item.recurrenceKey}`; }
   async function refreshCalendar() { calendarItems = (await listCalendarAgendaItems()).filter((item) => !stagedRemoteDeleteKeys.has(remoteDeleteKey(item))); }
   async function refreshCalendarSettings() { calendarSettings = await listCalendarSettings(); }
@@ -634,7 +719,7 @@
   }
   async function editActiveDetail(field: typeof activeDetailField = "title") {
     if (!activeDetailEntry || detailSaving) return;
-    if (activeDetailEntry.kind === "calendar" && activeDetailEntry.item.pendingRemote && (activeDetailEntry.item.pendingRemote.kind !== "updateEventV3" || activeDetailEntry.item.pendingRemote.status === "conflict")) return;
+    if (activeDetailEntry.kind === "calendar" && activeDetailEntry.item.pendingRemote && (activeDetailEntry.item.pendingRemote.kind !== "updateEventV3" || activeDetailEntry.item.pendingRemote.status === "conflict" || activeDetailEntry.item.pendingRemote.status === "recoveryNeeded")) return;
     if (activeDetailEntry.kind === "calendar") openCalendarModal(activeDetailEntry.item);
     else openTodoModal(activeDetailEntry.item);
     activeDetailField = field;
@@ -644,11 +729,32 @@
     await tick();
     document.querySelector<HTMLElement>(`[data-detail-field="${field}"] input, [data-detail-field="${field}"] textarea, [data-detail-field="${field}"] select`)?.focus();
   }
-  function resetDetailSelection() { if (!leaveDetail()) return; detailModal = null; selectedTodoId = null; selectedTodoOccurrenceKey = null; selectedCalendarKey = null; selectedCalendarResourceId = null; detailEditing = false; }
+  function resetDetailSelection() { if (!leaveDetail()) return; detailModal = null; selectedTodoId = null; selectedTodoOccurrenceKey = null; selectedCalendarKey = null; selectedCalendarResourceId = null; selectedSearchEntry = null; detailEditing = false; }
   function toggleCalendarFilter(calendarId: string) {
+    if (!calendarSelectionReady) return;
     const next = new Set(hiddenCalendarFilters);
     if (next.has(calendarId)) next.delete(calendarId); else next.add(calendarId);
     hiddenCalendarFilters = next;
+    calendarSelectionRevision++;
+    void saveCalendarSelection();
+  }
+
+  async function saveCalendarSelection() {
+    if (savingCalendarSelection) return;
+    savingCalendarSelection = true;
+    try {
+      let submittedRevision: number;
+      do {
+        submittedRevision = calendarSelectionRevision;
+        try {
+          const snapshot = await setCalendarDisplaySelection([...hiddenCalendarFilters]);
+          applyCalendarSelection(snapshot);
+        } catch (error) {
+          if (submittedRevision === calendarSelectionRevision) hiddenCalendarFilters = new Set(confirmedCalendarFilters);
+          if (!calendarSelectionDisposed) await reportFailure("calendar-display-selection", error, translate(language, "updateFailedRetry"));
+        }
+      } while (submittedRevision !== calendarSelectionRevision);
+    } finally { savingCalendarSelection = false; }
   }
 
   function cancelReorder() {
@@ -945,12 +1051,12 @@
     finally { credentialUsername = ""; credentialPassword = ""; markBusy(account.accountId, false); }
   }
 
-  async function attachSource(account: RuntimeAccountProfile, mode: "synthetic" | "icloudChinaReadOnly") {
+  async function attachSource(account: RuntimeAccountProfile) {
     markBusy(account.accountId, true); clearMessages();
     try {
-      const state = await attachAccountSource(account.accountId, mode);
+      const state = await attachAccountSource(account.accountId, "icloudChinaReadOnly");
       attachmentStates = new Map(attachmentStates).set(account.accountId, state);
-    } catch (error) { await reportFailure("attach-calendar-source", error, translate(language, mode === "synthetic" ? "sampleCalendarOpenFailed" : "icloudConnectFailed")); }
+    } catch (error) { await reportFailure("attach-calendar-source", error, translate(language, "icloudConnectFailed")); }
     finally { markBusy(account.accountId, false); }
   }
 
@@ -1193,6 +1299,7 @@
       const saved = await saveLocalTodo({ todoId: todo.todoId, selectedOccurrenceKey: todo.occurrenceKey, calendarId: snapshot.calendarId, title: v.title, notes: v.notes || null, location: v.location || null, startAtUtcMs: fromLocalInput(v.start), dueAtUtcMs: fromLocalInput(v.due), priority: snapshot.priority, important: v.important, tagNames: v.tags, recurrence: recurrenceInput(v.recurrence, v.recurrenceInterval, snapshot.options) });
       todos = todos.map((item) => item.todoId === todo.todoId && item.occurrenceKey === todo.occurrenceKey ? saved : item);
       session.todo = saved;
+      if (selectedSearchEntry?.kind === "todo" && selectedSearchEntry.item.todoId === todo.todoId && selectedSearchEntry.item.occurrenceKey === todo.occurrenceKey) selectedSearchEntry = { kind: "todo", item: saved, key: todoEntryKey(saved) };
       if (current()) {
         submittedTodo = saved;
         if (explicit) { editingId = null; detailEditing = false; }
@@ -1265,7 +1372,7 @@
     try {
       await deleteLocalTodo(todo.todoId);
       todos = todos.filter((item) => item.todoId !== todo.todoId); editingId = null; resetDetailSelection();
-      scheduleUndoDeletion({ kind: "local", id: todo.todoId, title: todo.title });
+      scheduleUndoDeletion({ kind: "local", id: todo.todoId, title: todo.title, calendarId: todo.calendarId });
     }
     catch (error) { errorMessage = messageFrom(error, translate(language, "localTodoDeleteFailed")); }
     finally { markBusy(todo.todoId, false); }
@@ -1276,7 +1383,8 @@
     try {
       await deleteLocalTodoOccurrence(todo.todoId,todo.occurrenceKey);
       todos = todos.filter((item) => todoEntryKey(item) !== todoEntryKey(todo));
-      scheduleUndoDeletion({ kind:"localOccurrence", id:todo.todoId, occurrenceKey:todo.occurrenceKey, title:todo.title });
+      resetDetailSelection();
+      scheduleUndoDeletion({ kind:"localOccurrence", id:todo.todoId, occurrenceKey:todo.occurrenceKey, title:todo.title, calendarId:todo.calendarId });
     } catch (error) { errorMessage = messageFrom(error,translate(language,"localTodoDeleteFailed")); }
     finally { markBusy(todo.todoId,false); }
   }
@@ -1423,7 +1531,7 @@
 </script>
 
 <svelte:head><meta name="description" content="Calendar TODO local agenda." /></svelte:head>
-<svelte:window oncontextmenu={(event) => event.preventDefault()} onlostpointercapture={lostReorderCapture} onblur={() => { cancelReorder(); deleteMenu = null; reorderMenu = null; }} onkeydown={(event) => { if (event.key === "Escape") { cancelReorder(); deleteMenu = null; reorderMenu = null; } }} onpointermove={moveReorder} onpointerup={endReorder} onpointercancel={endReorder} />
+<svelte:window oncontextmenu={(event) => event.preventDefault()} onlostpointercapture={lostReorderCapture} onblur={() => { cancelReorder(); deleteMenu = null; reorderMenu = null; }} onkeydown={(event) => { if (event.ctrlKey && event.key.toLowerCase() === "k" && !event.isComposing && !createModal && !submitting) { event.preventDefault(); activateRailItem(() => currentView = "search"); void tick().then(() => searchWorkspace?.focus()); } if (event.key === "Escape") { cancelReorder(); deleteMenu = null; reorderMenu = null; } }} onpointermove={moveReorder} onpointerup={endReorder} onpointercancel={endReorder} />
 <a class="skip-link" href="#agenda-list">{translate(language, "skipToAgenda")}</a>
 
 <div class="window-chrome" class:rail-pinned={railPinnedOpen} role="group" aria-label={translate(language, "windowControls")} onpointerdown={startMainWindowDrag} onpointermove={moveMainWindowDrag} onpointerup={endMainWindowDrag} onpointercancel={endMainWindowDrag} ondblclick={handleChromeDoubleClick}>
@@ -1449,11 +1557,12 @@
       {#each [["all", "agenda"], ["today", "today"], ["incomplete", "incomplete"]] as option}
         <button type="button" onpointerenter={() => enterRailItem(option[0])} aria-label={translate(language, option[1] as MessageKey)} title={translate(language, option[1] as MessageKey)} aria-current={currentView === "agenda" && agendaFilter === option[0] ? "page" : undefined} onclick={() => activateRailItem(() => { currentView = "agenda"; agendaFilter = option[0] as typeof agendaFilter; })}><svg viewBox="0 0 24 24" aria-hidden="true">{#if option[0] === "all"}<path d="M5 6h14M5 12h14M5 18h10" />{:else if option[0] === "today"}<path d="M5 5h14v14H5zM8 3v4M16 3v4M5 9h14" />{:else}<circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2" />{/if}</svg><span>{translate(language, option[1] as MessageKey)}</span></button>
       {/each}
+      <button type="button" aria-label={translate(language,"searchWorkspace")} title={`${translate(language,"searchWorkspace")} · Ctrl+K`} aria-current={currentView === "search" ? "page" : undefined} onclick={() => activateRailItem(() => { currentView = "search"; })}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><span>{translate(language,"searchWorkspace")}</span></button>
     </nav>
     <div class="sidebar-calendars">
       <h2><span class="calendar-stack-icon" aria-hidden="true"></span><span>{translate(language, "calendarFilters")}</span></h2>
       {#each sidebarCalendars as calendar (calendar.id)}
-        <button type="button" onpointerenter={() => enterRailItem(`calendar:${calendar.id}`)} aria-pressed={!hiddenCalendarFilters.has(calendar.id)} title={calendar.name} onclick={() => activateRailItem(() => toggleCalendarFilter(calendar.id))}><span class="filter-dot" class:hollow={hiddenCalendarFilters.has(calendar.id)} style:--calendar-color={calendar.color}></span><span>{calendar.name}</span></button>
+        <button type="button" onpointerenter={() => enterRailItem(`calendar:${calendar.id}`)} aria-pressed={!hiddenCalendarFilters.has(calendar.id)} disabled={!calendarSelectionReady} title={calendar.name} onclick={() => activateRailItem(() => toggleCalendarFilter(calendar.id))}><span class="filter-dot" class:hollow={hiddenCalendarFilters.has(calendar.id)} style:--calendar-color={calendar.color}></span><span>{calendar.name}</span></button>
       {/each}
     </div>
     <div class="rail-bottom">
@@ -1463,7 +1572,7 @@
   </div>
 
   <div class="page-heading">
-    {#if currentView === "agenda"}<div class="day-anchor"><span class="day-number">{todayDayNumber}</span><span class="day-copy"><strong>{todayWeekday}</strong><span>{todayMonthYear}</span></span></div>{:else}<h1>{translate(language, "settings")}</h1>{/if}
+    {#if currentView === "agenda"}<div class="day-anchor"><span class="day-number">{todayDayNumber}</span><span class="day-copy"><strong>{todayWeekday}</strong><span>{todayMonthYear}</span></span></div>{:else}<h1>{translate(language, currentView === "search" ? "searchHeading" : "settings")}</h1>{/if}
     {#if currentView === "agenda"}<Button class="new-event-action" variant="primary" type="button" onclick={openCreateModal}>{translate(language, "newEvent")}</Button>{/if}
   </div>
 
@@ -1512,7 +1621,7 @@
               <label>{translate(language, "future")}<input name="displayFutureDays" type="number" min="0" max="3650" step="1" value={calendar.displayFutureDays ?? ""} />{translate(language, "days")}</label>
             </form>
             <p class="field-help">{translate(language, "blankRangeShowsAll")}</p>
-            <Button variant="secondary" type="button" disabled={localCalendars.length < 2} title={translate(language, localCalendars.length < 2 ? "keepOneLocalCalendar" : "deleteLocalCalendar")} onclick={() => removeLocalCalendar(calendar)}>{translate(language, "delete")}</Button></div>{/if}
+            <Button variant="secondary" type="button" disabled={localCalendars.length < 2} title={translate(language, localCalendars.length < 2 ? "keepOneLocalCalendar" : "deleteLocalCalendar")} onclick={() => deletingLocalCalendar = calendar}>{translate(language, "delete")}</Button></div>{/if}
           </div>
         {/each}
         <div class="new-local-calendar"><input aria-label={translate(language, "newCalendarName")} bind:value={newLocalCalendarName} maxlength="128" placeholder={translate(language, "newCalendarName")} /><input aria-label={translate(language, "newCalendarColor")} type="color" bind:value={newLocalCalendarColor} /><Button variant="secondary" type="button" onclick={addLocalCalendar}>{translate(language, "createCalendar")}</Button></div>
@@ -1529,10 +1638,10 @@
                 {:else if !account.credentialConfigured}<button class="primary-action" type="button" disabled={busyIds.has(account.accountId)} onclick={() => editCredential(account.accountId)}>{translate(language, "configureLogin")}</button>
                 {:else if attachmentStates.get(account.accountId)?.state === "attaching"}<button class="primary-action" type="button" disabled>{controlText(language, "connectingIcloud")}</button>
                 {:else if attachmentStates.get(account.accountId)?.state === "ready" && attachmentStates.get(account.accountId)?.sourceMode === "icloudChinaReadOnly"}<button class="primary-action" type="button" disabled={syncingIds.has(account.accountId) || syncStates.get(account.accountId)?.state === "running"} onclick={() => syncAccount(account)}>{controlText(language, syncingIds.has(account.accountId) || syncStates.get(account.accountId)?.state === "running" ? "syncing" : "syncNow")}</button>
-                {:else}<button class="primary-action" type="button" disabled={busyIds.has(account.accountId) || account.regionProfile !== "icloud-cn"} onclick={() => attachSource(account, "icloudChinaReadOnly")}>{translate(language, "connectIcloud")}</button>{/if}
+                {:else}<button class="primary-action" type="button" disabled={busyIds.has(account.accountId) || account.regionProfile !== "icloud-cn"} onclick={() => attachSource(account)}>{translate(language, "connectIcloud")}</button>{/if}
               </div>
               {#if credentialAccountId === account.accountId}<form class="credential-form" onsubmit={(event) => saveCredential(event, account)}><div><label for={`credential-username-${account.accountId}`}>Apple ID</label><input id={`credential-username-${account.accountId}`} bind:value={credentialUsername} autocomplete="username" maxlength="512" required /></div><div><label for={`credential-password-${account.accountId}`}>{translate(language, "appSpecificPassword")}</label><input id={`credential-password-${account.accountId}`} type="password" bind:value={credentialPassword} autocomplete="new-password" maxlength="2560" required /></div><div class="actions"><button class="primary-action" type="submit" disabled={busyIds.has(account.accountId)}>{translate(language, "saveAndConnect")}</button><button class="secondary-action" type="button" onclick={cancelCredential}>{translate(language, "cancel")}</button></div><p class="field-help wide">{translate(language, "credentialStorageHelp")}</p></form>{/if}
-              <details class="account-advanced"><summary>{translate(language, "moreActions")}</summary><div class="account-actions">{#if account.enabled && account.credentialConfigured}{#if import.meta.env.DEV}<button class="secondary-action" type="button" disabled={busyIds.has(account.accountId)} onclick={() => attachSource(account, "synthetic")}>{translate(language, "trySampleCalendar")}</button>{/if}<button class="secondary-action" type="button" disabled={discoveringIds.has(account.accountId) || attachmentStates.get(account.accountId)?.state === "attaching"} onclick={() => discoverCalendars(account.accountId)}>{controlText(language, discoveringIds.has(account.accountId) ? "refreshing" : "refreshCalendars")}</button>{/if}<button class="secondary-action" type="button" disabled={busyIds.has(account.accountId)} onclick={() => editCredential(account.accountId)}>{translate(language, account.credentialConfigured ? "changeLogin" : "configureLogin")}</button>{#if account.enabled}<button class="secondary-action" type="button" disabled={busyIds.has(account.accountId)} onclick={() => toggleAccount(account)}>{translate(language, "pauseAccount")}</button>{/if}<button class="secondary-action danger-action" type="button" disabled={busyIds.has(account.accountId)} onclick={() => removeAccount(account)}>{translate(language, "deleteAccount")}</button></div>
+              <details class="account-advanced"><summary>{translate(language, "moreActions")}</summary><div class="account-actions">{#if account.enabled && account.credentialConfigured}<button class="secondary-action" type="button" disabled={discoveringIds.has(account.accountId) || attachmentStates.get(account.accountId)?.state === "attaching"} onclick={() => discoverCalendars(account.accountId)}>{controlText(language, discoveringIds.has(account.accountId) ? "refreshing" : "refreshCalendars")}</button>{/if}<button class="secondary-action" type="button" disabled={busyIds.has(account.accountId)} onclick={() => editCredential(account.accountId)}>{translate(language, account.credentialConfigured ? "changeLogin" : "configureLogin")}</button>{#if account.enabled}<button class="secondary-action" type="button" disabled={busyIds.has(account.accountId)} onclick={() => toggleAccount(account)}>{translate(language, "pauseAccount")}</button>{/if}<button class="secondary-action danger-action" type="button" disabled={busyIds.has(account.accountId)} onclick={() => removeAccount(account)}>{translate(language, "deleteAccount")}</button></div>
               <section class="mutation-settings" aria-label={text("remoteEditingSettings", { name: account.userLabel })}>
                 <Switch label={translate(language, "allowRemoteIntent")} checked={account.remoteEditingEnabled} disabled={!account.enabled || busyIds.has(account.accountId)} onChange={(checked) => toggleRemoteEditing(account, checked)} />
                 <p class="field-help">{translate(language, "remoteIntentHelp")}</p>
@@ -1580,7 +1689,9 @@
 
 
 
-  <div class="today-workspace">
+  <div class="today-workspace" class:search-active={currentView === "search"}>
+  <SearchWorkspace bind:this={searchWorkspace} {language} active={currentView === "search"} excludedResources={[...stagedRemoteDeleteKeys]} dataRevision={[todos, calendarItems, localCalendars, calendarSettings]} select={openSearchSummary} failure={(error) => void reportFailure("search-workspace",error,translate(language,"searchFailed"))} />
+  {#if currentView === "agenda"}
   <section id="agenda-list" class="agenda" class:hide-time={!settingsMainShowTime} aria-labelledby="agenda-title" aria-busy={loading}>
     <div class="agenda-heading"><h2 id="agenda-title">{translate(language, "agenda")}</h2><span class="agenda-summary" aria-label={text("agendaSummaryAria", { pending: pendingCount, calendars: calendarItems.length, todos: todos.length })}>{text("timelineCount", { count: timelineEntries.length })}</span></div>
     {#if loading}<p class="loading-state">{translate(language, "loadingAgenda")}</p>
@@ -1614,7 +1725,7 @@
           <div class="todo-row">
             <button class="complete-button" style:--completion-color={entry.item.calendarColor ?? undefined} type="button" aria-label={text(entry.item.completed ? "restoreItem" : "completeItem", { title: entry.item.title })} aria-pressed={entry.item.completed} disabled={completionChanges.has(entry.key) || (entry.kind === "calendar" && (entry.item.status !== "ready" || !!entry.item.pendingRemote))} onclick={() => entry.kind === "calendar" ? toggleCalendar(entry.item) : toggle(entry.item)}><span aria-hidden="true">{entry.item.completed ? "✓" : ""}</span></button>
             <button class="todo-copy row-open" type="button" onclick={() => entry.kind === "calendar" ? openCalendarModal(entry.item) : openTodoModal(entry.item)}>
-              <p class="entry-title-line"><span class="entry-title" use:fitOneLine>{entry.item.title}</span>{#if settingsMainShowTags && entry.item.tags.length}<span class="entry-tags" use:fitOneLine>{entry.item.tags.map((tag) => `#${tag.name}`).join(" ")}</span>{/if}</p>{#if settingsMainShowCalendarName || settingsMainShowTime || entry.item.important || entry.item.completed || entry.kind === "calendar" && entry.item.pendingRemote}<span class="entry-metadata" use:fitOneLine>{#if settingsMainShowCalendarName}<b class="calendar-name" style:color={entry.item.calendarColor ?? undefined}>{entry.item.calendarName}</b>{/if}{#if settingsMainShowTime}<time datetime={agendaDateTime(entryTime(entry))}>{agendaMetadataTime(entry)}</time>{/if}{#if entry.item.important}<span>{translate(language, "pinned")}</span>{/if}{#if entry.item.completed}<span>{translate(language, "completed")}</span>{/if}{#if entry.kind === "calendar" && entry.item.pendingRemote}<span>{translate(language, entry.item.pendingRemote.status === "conflict" ? "syncConflict" : entry.item.pendingRemote.status === "retryNeeded" ? "remoteRetryNeeded" : "pendingRemoteSave")}</span>{/if}</span>{/if}
+              <p class="entry-title-line"><span class="entry-title" use:fitOneLine>{entry.item.title}</span>{#if settingsMainShowTags && entry.item.tags.length}<span class="entry-tags" use:fitOneLine>{entry.item.tags.map((tag) => `#${tag.name}`).join(" ")}</span>{/if}</p>{#if settingsMainShowCalendarName || settingsMainShowTime || entry.item.important || entry.item.completed || entry.kind === "calendar" && entry.item.pendingRemote}<span class="entry-metadata" use:fitOneLine>{#if settingsMainShowCalendarName}<b class="calendar-name" style:color={entry.item.calendarColor ?? undefined}>{entry.item.calendarName}</b>{/if}{#if settingsMainShowTime}<time datetime={agendaDateTime(entryTime(entry))}>{agendaMetadataTime(entry)}</time>{/if}{#if entry.item.important}<span>{translate(language, "pinned")}</span>{/if}{#if entry.item.completed}<span>{translate(language, "completed")}</span>{/if}{#if entry.kind === "calendar" && entry.item.pendingRemote}<span>{translate(language, entry.item.pendingRemote.status === "recoveryNeeded" ? "remoteRecoveryNeeded" : entry.item.pendingRemote.status === "conflict" ? "syncConflict" : entry.item.pendingRemote.status === "retryNeeded" ? "remoteRetryNeeded" : "pendingRemoteSave")}</span>{/if}</span>{/if}
             </button>
             <button class="agenda-reorder" type="button" aria-haspopup="menu" aria-label={text("reorderItem", { title: entry.item.title })} title={translate(language, "holdToReorder")} onpointerdown={(event) => startReorder(event, entry.key)} oncontextmenu={(event) => openReorderMenu(event, entry.key)} onkeydown={(event) => reorderMenuKey(event, entry.key)} onclick={(event) => { if (event.detail === 0) openReorderMenu(event, entry.key); }} ondblclick={(event) => event.stopPropagation()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M5 12h14M5 17h14" /></svg></button>
           </div>
@@ -1623,10 +1734,13 @@
       </ul>{/if}
       <button class="workspace-blank" type="button" aria-label={translate(language, "eventDetails")} onclick={resetDetailSelection}></button>
   </section>
+  {/if}
   </div>
   <aside class="event-detail-pane" aria-busy={detailSaving} class:detail-editing={detailEditing} aria-labelledby="event-detail-title">
     <div class="detail-pane-heading"><h2 id="event-detail-title">{translate(language, "eventDetails")}</h2></div>
-    {#if detailEditing && detailModal === "todo" && selectedTodo}
+    {#if currentView === "search" && remoteSearchDetail}
+      <div class="detail-summary"><h3>{remoteSearchDetail.title}</h3><p>{remoteSearchDetail.calendarName}</p><p>{formatTime(remoteSearchDetail.startAtUtcMs)} – {formatTime(remoteSearchDetail.endAtUtcMs)}</p>{#if remoteSearchDetail.location}<p>{remoteSearchDetail.location}</p>{/if}{#if remoteSearchDetail.notes}<p style="white-space:pre-wrap">{remoteSearchDetail.notes}</p>{/if}<p class="field-help">{translate(language,"searchRemoteOnly")}</p></div>
+    {:else if detailEditing && detailModal === "todo" && selectedTodo}
       {@const todo = selectedTodo}
       {#if errorMessage}<p class="message error" role="alert">{errorMessage}</p>{/if}
       <form id="todo-detail-form" class="inline-detail-form" autocomplete="off" oninput={scheduleDetailAutoSave} onchange={scheduleDetailAutoSave} onsubmit={submitDetail} aria-label={text("editItem", { title: todo.title })} aria-busy={detailSaving}>
@@ -1680,7 +1794,7 @@
       </div>
       {#if activeDetailEntry.kind !== "calendar" || !activeDetailEntry.item.pendingRemote}<p class="detail-edit-hint">{translate(language, "clickToEdit")}</p>{/if}
       {#if activeDetailEntry.kind === "calendar" && activeDetailEntry.item.pendingRemote}
-        <div class="pending-remote-detail"><span>{translate(language, activeDetailEntry.item.pendingRemote.status === "conflict" ? "syncConflict" : activeDetailEntry.item.pendingRemote.status === "retryNeeded" ? "remoteRetryNeeded" : "pendingRemoteSave")}</span>{#if activeDetailEntry.item.pendingRemote.kind === "updateEventV3" && activeDetailEntry.item.pendingRemote.status !== "conflict"}<button class="secondary-action" type="button" onclick={() => editActiveDetail("title")}>{translate(language, "editDetails")}</button>{/if}{#if activeDetailEntry.item.pendingRemote.status === "conflict" && activeDetailEntry.item.pendingRemote.kind === "delete"}<button class="secondary-action" type="button" disabled={busyIds.has(activeDetailEntry.item.pendingRemote.operationId)} onclick={() => keepPendingRemote(activeDetailEntry.item)}>{translate(language,"keepRemoteVersion")}</button>{/if}{#if activeDetailEntry.item.pendingRemote.status !== "conflict"}<button class="secondary-action" type="button" disabled={busyIds.has(activeDetailEntry.item.pendingRemote.operationId)} onclick={() => retryPendingRemote(activeDetailEntry.item)}>{controlText(language, busyIds.has(activeDetailEntry.item.pendingRemote.operationId) ? "processing" : activeDetailEntry.item.pendingRemote.kind === "delete" ? "retryDelete" : "retrySave")}</button>{/if}</div>
+        <div class="pending-remote-detail"><span>{translate(language, activeDetailEntry.item.pendingRemote.status === "recoveryNeeded" ? "remoteRecoveryNeeded" : activeDetailEntry.item.pendingRemote.status === "conflict" ? "syncConflict" : activeDetailEntry.item.pendingRemote.status === "retryNeeded" ? "remoteRetryNeeded" : "pendingRemoteSave")}</span>{#if activeDetailEntry.item.pendingRemote.status === "recoveryNeeded"}<small>{activeDetailEntry.item.remoteEditBlockedReason}</small>{/if}{#if activeDetailEntry.item.pendingRemote.kind === "updateEventV3" && activeDetailEntry.item.pendingRemote.status !== "conflict" && activeDetailEntry.item.pendingRemote.status !== "recoveryNeeded"}<button class="secondary-action" type="button" onclick={() => editActiveDetail("title")}>{translate(language, "editDetails")}</button>{/if}{#if activeDetailEntry.item.pendingRemote.status === "conflict"}<button class="secondary-action" type="button" disabled={busyIds.has(activeDetailEntry.item.pendingRemote.operationId)} onclick={() => resolveDetailConflict(activeDetailEntry.item, "keepRemote")}>{translate(language,"keepRemoteVersion")}</button><button class="secondary-action" type="button" disabled={busyIds.has(activeDetailEntry.item.pendingRemote.operationId) || !activeDetailEntry.item.pendingRemote.retryLocalAllowed} onclick={() => resolveDetailConflict(activeDetailEntry.item, "retryLocal")}>{translate(language, "retryLocalChanges")}</button>{#if !activeDetailEntry.item.pendingRemote.retryLocalAllowed}<small>{translate(language, "conflictRefreshRequired")}</small>{/if}{/if}{#if activeDetailEntry.item.pendingRemote.status !== "conflict" && activeDetailEntry.item.pendingRemote.status !== "recoveryNeeded"}<button class="secondary-action" type="button" disabled={busyIds.has(activeDetailEntry.item.pendingRemote.operationId)} onclick={() => retryPendingRemote(activeDetailEntry.item)}>{controlText(language, busyIds.has(activeDetailEntry.item.pendingRemote.operationId) ? "processing" : activeDetailEntry.item.pendingRemote.kind === "delete" ? "retryDelete" : "retrySave")}</button>{/if}</div>
       {/if}
     {:else}<div class="detail-empty"><p>{translate(language, "nothingToday")}</p><span>{translate(language, "emptyAgendaHelp")}</span></div>{/if}
   </aside>
@@ -1713,6 +1827,13 @@
     </div>
   {/if}
   {/if}
+  {#if deletingLocalCalendar}
+    <DialogShell id="delete-local-calendar-title" title={translate(language, "deleteLocalCalendar")} closeLabel={translate(language, "close")} close={() => deletingLocalCalendar = null} disabled={localCalendarDeleteBusy}>
+      <p>{text("confirmDeleteLocalCalendar", { name: deletingLocalCalendar.name })}</p>
+      {#snippet footer()}<Button variant="secondary" type="button" data-autofocus disabled={localCalendarDeleteBusy} onclick={() => deletingLocalCalendar = null}>{translate(language, "cancel")}</Button><Button variant="danger" type="button" disabled={localCalendarDeleteBusy} onclick={() => void removeLocalCalendar()}>{translate(language, "deleteLocalCalendar")}</Button>{/snippet}
+    </DialogShell>
+  {/if}
+
   {#if accountModal}
     <DialogShell id="add-account-title" title={translate(language, "addCalendarAccount")} closeLabel={translate(language, "close")} close={() => { if (!savingAccount) accountModal = false; }} disabled={savingAccount}>
       <form id="add-account-form" class="account-form" onsubmit={addAccount} aria-busy={savingAccount}>
@@ -1752,6 +1873,7 @@
   .primary-action,.secondary-action{min-height:40px;border-radius:9px;padding:0 13px;font-weight:650}.primary-action{border:1px solid var(--primary);color:var(--color-on-primary);background:var(--primary)}.primary-action:hover:not(:disabled){background:var(--primary-hover)}.secondary-action{border:1px solid var(--border);color:var(--text);background:var(--surface)}.message{margin:0;padding:10px 12px;border-radius:10px;font-size:.86rem}.error{color:var(--color-danger-text);background:var(--color-danger-surface)}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
   .agenda{min-height:0}.calendar-copy{min-width:0;flex:1}.calendar-copy p{margin:0 0 4px;font-weight:650;overflow-wrap:anywhere}.calendar-copy span{display:block;color:var(--muted);font-size:.75rem;line-height:1.45}.unsupported-event{border-style:dashed!important}.todo-row{padding:10px}.complete-button{position:relative;width:44px;height:44px;flex:0 0 44px;display:grid;place-items:center;border:0;color:var(--completion-color,var(--primary));background:transparent}.complete-button::before{content:"";position:absolute;width:20px;height:20px;border:1.5px solid var(--completion-color,var(--color-border-strong));border-radius:5px;background:transparent}.complete-button[aria-pressed="true"]::before{background:transparent}.complete-button span{position:relative;font-size:13px;font-weight:750;line-height:1}.todo-copy{min-width:0;flex:1}.todo-copy p{margin:0 0 3px;overflow-wrap:anywhere;font-weight:650}.todo-copy span{display:block;color:var(--muted);font-size:.75rem}.field-help{margin:5px 0 0;color:var(--muted);font-size:.72rem;line-height:1.35}
   .wide{grid-column:1/-1}.actions{margin-top:12px;display:flex;gap:8px}.muted{color:var(--muted);font-size:.85rem}.empty-state,.loading-state{margin:28px auto;max-width:310px;text-align:center;color:var(--muted)}.empty-state p{margin:0;line-height:1.55}
+
   .agenda-heading{display:flex;align-items:center;gap:8px;justify-content:space-between;flex-wrap:wrap;margin-bottom:12px}.agenda-heading h2{margin:0}.agenda-summary{margin-left:auto;color:var(--muted);font-size:.82rem;font-weight:700;text-align:right}.settings-view .titlebar{justify-content:flex-start}.settings-card{padding:18px;overflow:visible}.settings-card>h2{margin-bottom:14px}.settings-form{padding:18px 0;margin-top:16px;gap:16px}.settings-form:first-of-type{border-top:0;margin-top:0;padding-top:0}.settings-form input[type="range"]{width:100%;min-height:32px;padding:0;border:0;background:transparent;accent-color:var(--primary)}.account-settings{margin-top:18px;padding:20px 0 4px}.account-list{gap:12px;margin:16px 0}.account-list li{padding:14px;gap:14px}.account-actions{display:flex;flex-wrap:wrap;gap:10px;width:100%;padding-top:6px}.account-form,.credential-form{gap:14px;margin-top:18px;padding-top:18px;border-top:1px solid var(--border)}.primary-action,.secondary-action{min-height:44px;padding:8px 16px;line-height:1.35}
   @media(max-width:600px){.agenda-heading{align-items:flex-start}.agenda-summary{max-width:100%}.primary-action{width:100%}.todo-row{align-items:flex-start;flex-wrap:wrap}.todo-copy{min-width:150px}.account-form,.credential-form{grid-template-columns:1fr}.wide{grid-column:auto}}
   .complete-button{width:36px;height:36px;flex:0 0 36px;align-self:center}
@@ -1802,6 +1924,7 @@
   .titlebar:hover .primary-navigation button,.titlebar:has(:focus-visible) .primary-navigation button,.titlebar:hover .desktop-toggle,.titlebar:has(:focus-visible) .desktop-toggle,.titlebar:hover .settings-toggle,.titlebar:has(:focus-visible) .settings-toggle,.titlebar:hover .sidebar-calendars button,.titlebar:has(:focus-visible) .sidebar-calendars button{width:190px}
   .primary-navigation span,.desktop-toggle span,.settings-toggle span,.sidebar-calendars button>span:last-child,.sidebar-calendars h2>span:last-child{opacity:0;transform:translateX(-5px);white-space:nowrap;transition:opacity var(--duration-standard) var(--ease-standard),transform var(--duration-panel) var(--ease-out)}.titlebar:hover .primary-navigation span,.titlebar:has(:focus-visible) .primary-navigation span,.titlebar:hover .desktop-toggle span,.titlebar:has(:focus-visible) .desktop-toggle span,.titlebar:hover .settings-toggle span,.titlebar:has(:focus-visible) .settings-toggle span,.titlebar:hover .sidebar-calendars button>span:last-child,.titlebar:has(:focus-visible) .sidebar-calendars button>span:last-child,.titlebar:hover .sidebar-calendars h2>span:last-child,.titlebar:has(:focus-visible) .sidebar-calendars h2>span:last-child{opacity:1;transform:none}
   .sidebar-calendars{margin-top:22px;padding-top:18px;border-top:1px solid var(--color-border)}.sidebar-calendars h2{height:30px;margin:0;padding:0 15px;display:flex;align-items:center;gap:13px;color:var(--muted);font-size:var(--font-size-caption);font-weight:650}.calendar-stack-icon{width:18px;height:18px;flex:0 0 18px;border:1.5px solid currentColor;border-radius:4px;box-shadow:4px 4px 0 -2px var(--surface-soft),4px 4px 0 -1px currentColor}.sidebar-calendars button{font-size:var(--font-size-caption)}.filter-dot{width:12px;height:12px;flex:0 0 12px;margin:0 4px;border:2px solid var(--calendar-color);border-radius:50%;background:var(--calendar-color)}.filter-dot.hollow{background:transparent}.rail-bottom{margin-top:auto;display:grid;gap:3px}.desktop-toggle{margin-top:0}.settings-toggle svg{width:20px;height:20px;flex:0 0 20px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}.settings-toggle:hover,.settings-toggle[aria-current="page"]{color:var(--text);background:color-mix(in srgb,var(--color-primary) 10%,transparent)}
+  .today-workspace.search-active{height:calc(100vh - 142px);min-height:0}
   .today-workspace{min-height:calc(100vh - 142px)}.agenda{--agenda-action-column:36px;max-width:780px}.timeline-items{position:relative}.timeline-items::before{content:"";position:absolute;left:75px;top:37px;bottom:0;width:1px;background:var(--color-border)}.agenda-items>li:has(.calendar-copy),.agenda-items .todo-row{padding:4px 2px;min-height:48px}.calendar-copy p,.todo-copy p{margin:0;font-size:.88rem}.agenda-reorder{top:7px}.now-line{position:relative;height:40px;margin:3px 0 4px 75px;border-top:1px solid var(--color-accent)}.now-line::before{content:"";position:absolute;left:-4px;top:-4px;width:7px;height:7px;border-radius:50%;background:var(--color-accent)}.now-line time{position:absolute;left:-70px;top:-15px;width:62px;display:flex;flex-direction:column;align-items:flex-end;gap:1px;color:var(--color-accent);font-size:var(--font-size-caption);font-variant-numeric:tabular-nums;line-height:1.05}.timeline-entry{position:relative}.timeline-entry .agenda-time{width:62px;flex:0 0 62px;padding:0;display:flex;flex-direction:column;align-items:flex-end;gap:1px;line-height:1.05}.timeline-dot{width:9px;height:9px;flex:0 0 9px;margin:0 5.5px;border-radius:50%;background:var(--completion-color,var(--color-primary))}.timeline-entry .entry-title-line{gap:12px}.timeline-entry .entry-title-line .entry-title,.timeline-calendar{color:inherit!important;font-size:inherit!important}.timeline-calendar{flex:0 1 auto;min-width:0;font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.timeline-empty{margin:8px 0 0 78px;color:var(--muted);font-size:var(--font-size-caption)}.todo-heading{margin-top:18px;margin-bottom:0;padding-inline:2px;display:grid;grid-template-columns:minmax(0,1fr) var(--agenda-action-column);align-items:center;flex-wrap:nowrap}:global(.todo-heading .reset-order-button){justify-self:center}:global(.todo-heading .reset-order-button svg){width:16px;height:16px}.todo-items .todo-row{display:grid;grid-template-columns:36px minmax(0,1fr) var(--agenda-action-column);align-items:center}.todo-items .agenda-reorder{position:static;width:var(--agenda-action-column);height:var(--agenda-action-column);justify-self:center}.completed-entry{color:var(--muted)}.completed-entry .todo-copy p{text-decoration:line-through}.completed-entry .calendar-name{color:var(--muted)!important}.completed-entry .agenda-reorder{opacity:.55}
   .completion-finishing,.completion-finishing .entry-title,.completion-finishing .todo-copy p{color:var(--muted)!important}.completion-finishing .entry-title,.completion-finishing .todo-copy p{text-decoration:line-through}.completion-restoring,.completion-restoring .entry-title,.completion-restoring .todo-copy p{color:var(--text)!important}.completion-restoring .entry-title,.completion-restoring .todo-copy p{text-decoration:none}
   .event-detail-pane{position:fixed;z-index:2;right:0;top:38px;bottom:0;width:318px;padding:30px 22px;overflow-y:auto;border-left:1px solid var(--color-border);background:var(--surface-soft);font-size:var(--font-size-meta)}.detail-pane-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:24px}.detail-pane-heading h2{margin:0;font-size:1rem}.detail-title{width:100%;padding:0 0 18px;display:grid;grid-template-columns:12px minmax(0,1fr);align-items:start;gap:10px;border:0;border-bottom:1px solid var(--color-border);color:var(--text);background:transparent;text-align:left}.detail-title strong{font-size:1.02rem;line-height:1.4}.detail-color{width:9px;height:9px;margin-top:5px;border-radius:50%;background:var(--primary)}.detail-edit-hint{margin-top:15px;color:var(--muted);font-size:var(--font-size-caption)}.detail-empty{padding-top:44px;color:var(--muted);text-align:center}.detail-empty p{color:var(--text);font-weight:650}.detail-empty span{font-size:var(--font-size-caption);line-height:1.5}

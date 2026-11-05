@@ -27,6 +27,13 @@ export class DeletionUndoQueue<T> {
     this.publish();
     return pending.entry.payload;
   }
+  removeWhere(matches: (payload: T) => boolean) {
+    for (const [token, { entry, timer }] of this.entries) if (matches(entry.payload)) {
+      this.clock.clear(timer);
+      this.entries.delete(token);
+    }
+    this.publish();
+  }
   dispose() {
     for (const { timer } of this.entries.values()) this.clock.clear(timer);
     this.entries.clear();

@@ -32,7 +32,6 @@ pub struct EnrollAccountCredential {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SourceAttachmentMode {
-    Synthetic,
     IcloudChinaReadOnly,
 }
 
@@ -83,24 +82,24 @@ pub struct RuntimeAccountView {
 pub struct AccountProfileService {
     registry: Arc<AccountSourceRegistry>,
     credentials: CredentialService,
-    synthetic_attacher: Arc<dyn SourceAttacher>,
     production_attacher: Arc<dyn SourceAttacher>,
 }
 
 impl AccountProfileService {
+    pub(crate) fn source_registry(&self) -> Arc<AccountSourceRegistry> {
+        self.registry.clone()
+    }
     pub(crate) fn belongs_to_registry(&self, registry: &Arc<AccountSourceRegistry>) -> bool {
         Arc::ptr_eq(&self.registry, registry)
     }
     pub fn new(
         registry: Arc<AccountSourceRegistry>,
         credentials: CredentialService,
-        synthetic_attacher: Arc<dyn SourceAttacher>,
         production_attacher: Arc<dyn SourceAttacher>,
     ) -> Self {
         Self {
             registry,
             credentials,
-            synthetic_attacher,
             production_attacher,
         }
     }
@@ -222,9 +221,6 @@ impl AccountProfileService {
     ) -> Result<RuntimeAccountView, AccountProfileServiceError> {
         self.validate_attachment(account_id)?;
         match mode {
-            SourceAttachmentMode::Synthetic => self
-                .synthetic_attacher
-                .attach_cancellable(account_id, cancellation)?,
             SourceAttachmentMode::IcloudChinaReadOnly => self
                 .production_attacher
                 .attach_cancellable(account_id, cancellation)?,

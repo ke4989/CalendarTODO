@@ -64,15 +64,11 @@ pub fn acquire() -> Result<InstanceRole, InstanceError> {
 }
 
 /// Separate diagnostic ownership; it never signals or launches the product.
-pub(crate) fn acquire_mutation_diagnostic() -> Result<InstanceRole, InstanceError> {
-    acquire_named(
-        "Local\\com.calendartodo.mutation-diagnostic",
-        "Local\\com.calendartodo.mutation-diagnostic.unused-event",
-    )
-}
 
 /// Ask the running instance to restore its window. A missing event means the
 /// owner is shutting down, which the caller treats as a normal no-op.
+/// Separate development ownership; never touches or signals the product names.
+
 pub fn signal_owner() -> Result<(), InstanceError> {
     signal_named(SHOW_EVENT_NAME)
 }

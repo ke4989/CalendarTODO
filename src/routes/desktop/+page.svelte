@@ -16,16 +16,17 @@
   import { fitOneLine } from "$lib/ui/fit-one-line";
   import { collectTagSuggestions } from "$lib/ui/tag-input";
   import { startReorderAutoScroll, type DragPoint } from "$lib/ui/reorder-auto-scroll";
-  import { reorderAtPointer } from "$lib/ui/reorder-preview";
+  import { mergeVisibleOrder, reorderAtPointer } from "$lib/ui/reorder-preview";
   import { reorderKeys, type ReorderAction } from "$lib/ui/reorder-menu";
   import { createBackdropClickGuard, dialogFocus } from "$lib/ui/dialog-focus";
   import { animateCompletionChange, reducedCompletionMotion, type CompletionDirection } from "$lib/ui/completion-motion";
   import { CompletionEventGate } from "$lib/ui/completion-events";
   import { withinCalendarDisplayRange } from "$lib/ui/calendar-display-range";
-  import { applyRemoteDraft, draftRequest, initialDraft, selectedBase, retryBackgroundRemoteWrite, startBackgroundRemoteWrite, utcInput, projectionCandidate, preparationHint, type PreparationState, type RemoteDraft } from "$lib/ui/remote-crud-preparation";
+  import { applyRemoteDraft, draftRequest, initialDraft, selectedBase, resolveBackgroundConflict, retryBackgroundRemoteWrite, startBackgroundRemoteWrite, utcInput, projectionCandidate, preparationHint, type PreparationState, type RemoteDraft } from "$lib/ui/remote-crud-preparation";
   import { applyTheme } from "$lib/theme/apply";
   import { remoteCalendarBlockedReason } from "$lib/ui/remote-calendar-availability";
-  import { confirmedRemoteEvent, listenConfirmedEvent, prepareRemoteCrud, listCalendarSettings, listAttachmentStates } from "$lib/ipc/client";
+  import { confirmedRemoteEvent, listenConfirmedEvent, listCalendarSettings, listAttachmentStates, getCalendarDisplaySelection, calendarDisplaySelectionEvent } from "$lib/ipc/client";
+  import type { CalendarDisplaySelection } from "$lib/ipc/contracts";
   import { deleteLocalTodo, deleteLocalTodoOccurrence, desktopCollapsed, getAppSettings, getDesktopItemOrder, listCalendarAgendaItems, listLocalCalendars, listLocalTodos, recordUiError, restoreRecentlyDeletedTodo, restoreRecentlyDeletedTodoOccurrence, saveLocalTodo, setCalendarCompleted, setDesktopCollapsed, setDesktopItemOrder, setDesktopPinned, setLocalTodoCompleted, startDesktopDrag, updateCalendarLocalMetadata } from "$lib/ipc/client";
   import type { AppSettings, AttachmentView, CalendarSettingsView, CalendarAgendaItem, CalendarCompletionChanged, LocalCalendar, LocalTodo, LocalTodoCompletionChanged, Priority, RecurrenceFrequency, RecurrenceOptions } from "$lib/ipc/contracts";
 
@@ -119,13 +120,18 @@
     void refresh();
     return { ...result, terminalFailed };
   }
-  async function keepPendingRemote(item: CalendarAgendaItem) {
+  async function resolveDetailConflict(item: CalendarAgendaItem, choice: "keepRemote" | "retryLocal") {
     const pending = item.pendingRemote;
     if (!pending || pending.status !== "conflict" || operationBusy) return;
-    operationBusy=true;
-    try { await prepareRemoteCrud({action:"resolveConflict",input:{operationId:pending.operationId,kind:pending.kind,choice:"keepRemote"}}); await refresh(); }
-    catch (failure) { void reportActionFailure("deleteAction","remoteConflictResolution",diagnosticFrom(failure)); }
-    finally { operationBusy=false; }
+    operationBusy = true;
+    try {
+      const retry = await resolveBackgroundConflict({ kind: pending.kind, operationId: pending.operationId, accountId: pending.accountId, calendarId: item.calendarId, resourceId: item.resourceId }, choice, confirmedRemoteEvent);
+      operationBusy = false;
+      if (retry) await retryPendingRemote({ ...item, pendingRemote: { ...pending, operationId: retry.operationId, status: "retryNeeded" } });
+      await refresh();
+      if (!retry) showActionToast(controlText(language, "remoteVersionKept"), "success");
+    } catch (failure) { void reportActionFailure("saveAction", "remoteConflictResolution", diagnosticFrom(failure)); }
+    finally { operationBusy = false; }
   }
   async function retryPendingRemote(item: CalendarAgendaItem) {
     const pendingRemote = item.pendingRemote;
@@ -207,12 +213,22 @@
     ({ title, notes, location, start, due, calendarId, priority, important, tags, recurrence, interval, recurrenceOptions, editingTodo, viewingCalendar } = saved);
   }
   let initialLoading = $state(true);
+  let calendarSelectionReady = $state(false);
+  let hiddenCalendarFilters = $state<Set<string>>(new Set());
+  let calendarSelectionVersion = -1;
+  function applyCalendarSelection(snapshot: CalendarDisplaySelection) {
+    if (snapshot.version <= calendarSelectionVersion) return;
+    calendarSelectionVersion = snapshot.version;
+    cancelReorder();
+    hiddenCalendarFilters = new Set(snapshot.hiddenCalendarIds);
+    calendarSelectionReady = true;
+  }
   let completionChanges = $state<Map<string, CompletionDirection>>(new Map());
   const localCompletionEvents = new CompletionEventGate<LocalTodoCompletionChanged>();
   const calendarCompletionEvents = new CompletionEventGate<CalendarCompletionChanged>();
   type UndoDeletion =
-    | { kind: "local"; id: string; title: string }
-    | { kind: "localOccurrence"; id: string; occurrenceKey: string; title: string }
+    | { kind: "local"; id: string; title: string; calendarId: string }
+    | { kind: "localOccurrence"; id: string; occurrenceKey: string; title: string; calendarId: string }
     | { kind: "remote"; id: string; title: string; item: CalendarAgendaItem; calendar: CalendarSettingsView };
   let undoItems = $state<UndoEntry<UndoDeletion>[]>([]);
   const undoQueue = new DeletionUndoQueue<UndoDeletion>((entries) => undoItems = entries, (item) => {
@@ -224,12 +240,13 @@
     const calendar = localCalendars.find((candidate) => candidate.calendarId === item.calendarId);
     return withinCalendarDisplayRange(item.startAtUtcMs, item.dueAtUtcMs, calendar?.displayPastDays ?? null, calendar?.displayFutureDays ?? null);
   }));
-  const pending = $derived(displayedTodos.filter((item) => !item.completed).length + calendarItems.filter((item) => item.status === "ready" && !item.completed).length);
-  const entries = $derived.by(() => {
+  const pending = $derived(displayedTodos.filter((item) => !hiddenCalendarFilters.has(item.calendarId) && !item.completed).length + calendarItems.filter((item) => !hiddenCalendarFilters.has(item.calendarId) && item.status === "ready" && !item.completed).length);
+  const allEntries = $derived.by(() => {
     const all: Entry[] = [...calendarItems.map((item): Entry => ({ key: calendarEntryKey(item), kind: "calendar", item })), ...displayedTodos.map((item): Entry => ({ key: todoEntryKey(item), kind: "todo", item }))];
     const rank = new Map((previewOrder ?? order).map((key, index) => [key, index]));
     return all.sort((a, b) => Number(a.item.completed) - Number(b.item.completed) || (a.item.completed && b.item.completed ? (a.item.completedAtMs ?? 0) - (b.item.completedAtMs ?? 0) : 0) || Number(b.item.important) - Number(a.item.important) || (rank.has(a.key) || rank.has(b.key) ? (rank.get(a.key) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.key) ?? Number.MAX_SAFE_INTEGER) : (desktopTimeValue(a) ?? Number.MAX_SAFE_INTEGER) - (desktopTimeValue(b) ?? Number.MAX_SAFE_INTEGER)) || a.key.localeCompare(b.key));
   });
+  const entries = $derived(allEntries.filter((entry) => !hiddenCalendarFilters.has(entry.item.calendarId)));
   function desktopTimeValue(entry: Entry): number | null { return entry.kind === "calendar" ? entry.item.startAtUtcMs : entry.item.startAtUtcMs ?? entry.item.dueAtUtcMs; }
   function desktopTime(entry: Entry): string | null {
     const start = desktopTimeValue(entry);
@@ -238,10 +255,13 @@
     return new Intl.DateTimeFormat(language, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(start);
   }
 
+  let refreshRevision = 0;
   async function refresh() {
+    const revision = ++refreshRevision;
     const currentPinRevision = pinRevision;
     try {
       const loaded = await Promise.all([listLocalTodos(), listCalendarAgendaItems(), getAppSettings(), getDesktopItemOrder(), listLocalCalendars(), listCalendarSettings(), listAttachmentStates()]);
+      if (revision !== refreshRevision) return;
       [todos, calendarItems, settings, order, localCalendars, calendarSettings] = loaded;
       if (currentPinRevision === pinRevision && !pinSaving) pinned = loaded[2].desktopPinned;
       calendarItems = calendarItems.filter((item) => !stagedRemoteDeleteKeys.has(remoteDeleteKey(item)));
@@ -250,15 +270,27 @@
         viewingCalendar = calendarItems.find((item) => item.resourceId === selected.resourceId && item.seriesId === selected.seriesId && item.recurrenceKey === selected.recurrenceKey) ?? null;
       }
       attachmentStates = new Map(loaded[6].map((state) => [state.accountId, state]));
-      if (!calendarId || localCalendars.find((calendar) => calendar.calendarId === calendarId)?.hidden) calendarId = preferredCreateCalendarId();
+      const validLocalCalendars = new Set(localCalendars.map((calendar) => calendar.calendarId));
+      undoQueue.removeWhere((item) => item.kind !== "remote" && !validLocalCalendars.has(item.calendarId));
+      if (editingTodo && !validLocalCalendars.has(editingTodo.calendarId)) { editingTodo = null; modal = null; }
+      for (const [identity, snapshot] of failedEditors) if (snapshot.editingTodo && !validLocalCalendars.has(snapshot.editingTodo.calendarId)) failedEditors.delete(identity);
+      if (!visibleLocalCalendars.some((calendar) => calendar.calendarId === calendarId) && !remoteDestinations.some((calendar) => calendar.calendarId === calendarId)) calendarId = preferredCreateCalendarId();
       error = "";
-    } catch { error = translate(language, "listRefreshFailed"); }
-    finally { initialLoading = false; }
+    } catch { if (revision === refreshRevision) error = translate(language, "listRefreshFailed"); }
+    finally { if (revision === refreshRevision) initialLoading = false; }
   }
 
   onMount(() => {
     let disposed = false;
     const stops: (() => void)[] = [];
+    void listen<CalendarDisplaySelection>(calendarDisplaySelectionEvent, (event) => {
+      if (!disposed) applyCalendarSelection(event.payload);
+    }).then(async (stop) => {
+      if (disposed) { stop(); return; }
+      stops.push(stop);
+      const snapshot = await getCalendarDisplaySelection();
+      if (!disposed) applyCalendarSelection(snapshot);
+    }).catch(() => { if (!disposed) { calendarSelectionReady = true; error = translate(language, "listRefreshFailed"); } });
     void listen<LocalTodoCompletionChanged | null>("calendar-todo://local-todo-changed", (event) => {
       const change = event.payload;
       if (change?.item) {
@@ -454,7 +486,7 @@
       void reportActionFailure("saveAction", "localSave", diagnosticFrom(failure));
     }
     } finally {
-      if (accepted) failedEditors.delete(identity); else if (identity !== "create") failedEditors.set(identity,snapshot);
+      if (accepted) failedEditors.delete(identity); else if (identity !== "create" && (!snapshot.editingTodo || localCalendars.some((calendar) => calendar.calendarId === snapshot.editingTodo!.calendarId))) failedEditors.set(identity,snapshot);
       const next = new Map(savingEditors); next.delete(identity); savingEditors = next;
     }
   }
@@ -465,14 +497,14 @@
       await deleteLocalTodo(item.todoId);
       if (editingTodo?.todoId === item.todoId) { modal = null; editingTodo = null; }
       await refresh();
-      scheduleUndoDeletion({ kind: "local", id: item.todoId, title: item.title });
+      scheduleUndoDeletion({ kind: "local", id: item.todoId, title: item.title, calendarId: item.calendarId });
     }
     catch { error = translate(language, "deleteFailedRetry"); }
     finally { operationBusy = false; }
   }
   async function removeOccurrence(item: LocalTodo) {
     if (busy) return; operationBusy=true;
-    try { await deleteLocalTodoOccurrence(item.todoId,item.occurrenceKey); await refresh(); scheduleUndoDeletion({ kind:"localOccurrence",id:item.todoId,occurrenceKey:item.occurrenceKey,title:item.title }); }
+    try { await deleteLocalTodoOccurrence(item.todoId,item.occurrenceKey); await refresh(); scheduleUndoDeletion({ kind:"localOccurrence",id:item.todoId,occurrenceKey:item.occurrenceKey,title:item.title,calendarId:item.calendarId }); }
     catch { error=translate(language,"deleteFailedRetry"); }
     finally { operationBusy=false; }
   }
@@ -662,9 +694,10 @@
     const keys = reorderKeys(entries.map((item) => item.key), group, key, action);
     closeReorderMenu();
     if (keys.every((item, index) => item === entries[index]?.key)) return;
-    order = keys;
+    const merged = mergeVisibleOrder(order, allEntries.map((item) => item.key), entries.map((item) => item.key), keys);
+    order = merged;
     reorderAnnouncement = text("reorderPosition", { title: entry?.item.title ?? "", position: keys.indexOf(key) + 1, count: keys.length });
-    void persistOrder(keys);
+    void persistOrder(merged);
   }
 
   function lostReorderCapture(event: PointerEvent) {
@@ -722,7 +755,8 @@
   function endReorder(event: PointerEvent) {
     if (!dragging || event.pointerId !== dragPointer) return;
     const insideList = !!(document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null)?.closest(".list-scroll");
-    const keys = event.type === "pointercancel" || !insideList ? null : previewOrder;
+    const preview = event.type === "pointercancel" || !insideList ? null : previewOrder;
+    const keys = preview ? mergeVisibleOrder(order, allEntries.map((entry) => entry.key), entries.map((entry) => entry.key), preview) : null;
     const changed = !!keys && keys.some((key, index) => key !== order[index]);
     if (keys) order = keys;
     cancelReorder();
@@ -745,7 +779,7 @@
 
 <svelte:head><title>{translate(language, "desktopTitle")}</title></svelte:head>
 <svelte:window oncontextmenu={(event) => { event.preventDefault(); deleteMenu = null; }} onlostpointercapture={lostReorderCapture} onblur={() => { cancelReorder(); deleteMenu = null; reorderMenu = null; }} onkeydown={(event) => { if (event.key === "Escape") { cancelReorder(); deleteMenu = null; reorderMenu = null; } }} onpointermove={moveReorder} onpointerup={endReorder} onpointercancel={endReorder} />
-<main class:collapsed class:metadata-hidden={!settings?.desktopShowCalendarName && !settings?.desktopShowTime && !settings?.desktopShowTags} aria-busy={initialLoading} style={`--opacity: ${settings?.desktopOpacityPercent ?? 82}%`}>
+<main class:collapsed class:metadata-hidden={!settings?.desktopShowCalendarName && !settings?.desktopShowTime && !settings?.desktopShowTags} aria-busy={initialLoading || !calendarSelectionReady} style={`--opacity: ${settings?.desktopOpacityPercent ?? 82}%`}>
   <ToastViewport>
     {#each undoItems as entry (entry.token)}<UndoToast title={entry.payload.title} undo={() => void undoDelete(entry.token)} {language} stacked />{/each}
     {#if actionToast}{#key actionToast.id}<ActionToast message={actionToast.message} variant={actionToast.variant} stacked />{/key}{/if}
@@ -766,14 +800,14 @@
   </header>
   {#if error && !modal}<p class="error" role="alert">{error}</p>{/if}
   {#if !collapsed}
-    {#if initialLoading}<p class="empty" role="status">{translate(language, "loadingAgenda")}</p>
+    {#if initialLoading || !calendarSelectionReady}<p class="empty" role="status">{translate(language, "loadingAgenda")}</p>
     {:else}
     <div class="list-scroll" class:desktop-scrollbar-visible={desktopScrollbarVisible} role="region" aria-label={translate(language, "agendaList")} onscroll={revealDesktopScrollbar} onpointermove={(event) => { const bounds = event.currentTarget.getBoundingClientRect(); if (event.clientX >= bounds.right - 12) revealDesktopScrollbar(); }}>
     <ul aria-label={translate(language, "agendaList")}>
       {#each entries as entry (entry.key)}
         <li tabindex="-1" data-key={entry.key} data-completion-motion-id={`desktop:${entry.key}`} data-completion-key={entry.key} class:completion-finishing={completionChanges.get(entry.key) === "complete"} class:completion-restoring={completionChanges.get(entry.key) === "restore"} class:dragging={dragging === entry.key} class:drop-target={!!dragging && dragging !== entry.key && dragOverKey === entry.key} oncontextmenu={(event) => openDeleteMenu(event, entry)} ondblclick={() => openEntry(entry)}>
           <button class="check" style:--completion-color={entry.item.calendarColor ?? undefined} type="button" aria-label={text(entry.item.completed ? "restoreItem" : "completeItem", { title: entry.item.title })} aria-pressed={entry.item.completed} disabled={completionChanges.has(entry.key) || (entry.kind === "calendar" && (entry.item.status !== "ready" || !!entry.item.pendingRemote))} onclick={() => entry.kind === "todo" ? toggleTodo(entry.item) : toggleCalendar(entry.item)} ondblclick={(event) => event.stopPropagation()}><span aria-hidden="true">{entry.item.completed ? "✓" : ""}</span></button>
-          <div class="item-text"><div class="item-title-line"><strong class:done={entry.item.completed} use:fitOneLine>{entry.item.title}</strong>{#if settings?.desktopShowTags && entry.item.tags.length}<span class="item-tags" use:fitOneLine>{entry.item.tags.map((tag) => `#${tag.name}`).join(" ")}</span>{/if}</div>{#if settings?.desktopShowCalendarName || settings?.desktopShowTime || entry.kind === "calendar" && entry.item.pendingRemote}<small class="item-metadata" use:fitOneLine>{#if settings?.desktopShowCalendarName}<b>{entry.item.calendarName}</b>{/if}{#if settings?.desktopShowTime}<time>{desktopTime(entry) ?? ""}</time>{/if}{#if entry.kind === "calendar" && entry.item.pendingRemote}<span>{translate(language, entry.item.pendingRemote.status === "conflict" ? "syncConflict" : entry.item.pendingRemote.status === "retryNeeded" ? "remoteRetryNeeded" : "pendingRemoteSave")}</span>{/if}</small>{/if}{#if entry.item.recurrence}<small class="recurrence-summary" use:fitOneLine>{recurrenceSummary(language, entry.item.recurrence.frequency, entry.item.recurrence.interval)}{entry.kind === "calendar" ? translate(language, "localOnlySuffix") : ""}</small>{/if}</div>
+          <div class="item-text"><div class="item-title-line"><strong class:done={entry.item.completed} use:fitOneLine>{entry.item.title}</strong>{#if settings?.desktopShowTags && entry.item.tags.length}<span class="item-tags" use:fitOneLine>{entry.item.tags.map((tag) => `#${tag.name}`).join(" ")}</span>{/if}</div>{#if settings?.desktopShowCalendarName || settings?.desktopShowTime || entry.kind === "calendar" && entry.item.pendingRemote}<small class="item-metadata" use:fitOneLine>{#if settings?.desktopShowCalendarName}<b>{entry.item.calendarName}</b>{/if}{#if settings?.desktopShowTime}<time>{desktopTime(entry) ?? ""}</time>{/if}{#if entry.kind === "calendar" && entry.item.pendingRemote}<span>{translate(language, entry.item.pendingRemote.status === "recoveryNeeded" ? "remoteRecoveryNeeded" : entry.item.pendingRemote.status === "conflict" ? "syncConflict" : entry.item.pendingRemote.status === "retryNeeded" ? "remoteRetryNeeded" : "pendingRemoteSave")}</span>{/if}</small>{/if}{#if entry.item.recurrence}<small class="recurrence-summary" use:fitOneLine>{recurrenceSummary(language, entry.item.recurrence.frequency, entry.item.recurrence.interval)}{entry.kind === "calendar" ? translate(language, "localOnlySuffix") : ""}</small>{/if}</div>
           <button class="reorder" type="button" aria-haspopup="menu" aria-label={text("reorderItem", { title: entry.item.title })} title={translate(language, "holdToReorder")} onpointerdown={(event) => startReorder(event, entry.key)} oncontextmenu={(event) => openReorderMenu(event, entry.key)} onkeydown={(event) => reorderMenuKey(event, entry.key)} onclick={(event) => { if (event.detail === 0) openReorderMenu(event, entry.key); }} ondblclick={(event) => event.stopPropagation()}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M5 12h14M5 17h14" /></svg></button>
         </li>
       {/each}
@@ -805,7 +839,7 @@
             {#if modal === "calendar" || remoteCreateCalendar}<small>{translate(language, "remoteTimeHelp")}{modal === "calendar" ? ` ${translate(language, "localMetadataHelp")}` : ""}</small>{/if}
             {#if remoteView}<p role="status" aria-live="polite">{remoteView.message}</p>{#each Object.values(remoteView.errors) as message}<p class="error" role="alert">{message}</p>{/each}{/if}
             </div>
-            <div class="form-actions">{#if modal === "todo"}<button class="delete-action" type="button" onclick={removeEditingTodo} disabled={busy}>{translate(language, "delete")}</button>{:else if modal === "calendar" && !viewingCalendar?.pendingRemote}<button class="delete-action" type="button" onclick={() => void removeRemoteEvent()} disabled={busy || remoteView?.busy || !!remoteReason || !viewingCalendar || !projectionCandidate(viewingCalendar)}>{translate(language, "delete")}</button>{/if}<button type="button" onclick={() => { modal = null; }} disabled={busy || remoteView?.busy}>{translate(language, "cancel")}</button>{#if modal === "calendar" && viewingCalendar?.pendingRemote?.kind === "delete" && viewingCalendar.pendingRemote.status === "conflict"}<button type="button" disabled={busy} onclick={() => viewingCalendar && keepPendingRemote(viewingCalendar)}>{translate(language,"keepRemoteVersion")}</button>{:else if modal === "calendar" && viewingCalendar?.pendingRemote}<button type="button" disabled={busy || viewingCalendar.pendingRemote.status === "conflict"} onclick={() => viewingCalendar && retryPendingRemote(viewingCalendar)}>{controlText(language, busy ? "processing" : viewingCalendar.pendingRemote.kind === "delete" ? "retryDelete" : "retrySave")}</button>{:else}<button type="submit" disabled={busy || remoteView?.busy || !title.trim()}>{controlText(language, busy || remoteView?.busy ? "saving" : "save")}</button>{/if}</div>
+            <div class="form-actions">{#if modal === "todo"}<button class="delete-action" type="button" onclick={removeEditingTodo} disabled={busy}>{translate(language, "delete")}</button>{:else if modal === "calendar" && !viewingCalendar?.pendingRemote}<button class="delete-action" type="button" onclick={() => void removeRemoteEvent()} disabled={busy || remoteView?.busy || !!remoteReason || !viewingCalendar || !projectionCandidate(viewingCalendar)}>{translate(language, "delete")}</button>{/if}<button type="button" onclick={() => { modal = null; }} disabled={busy || remoteView?.busy}>{translate(language, "cancel")}</button>{#if modal === "calendar" && viewingCalendar?.pendingRemote?.status === "conflict"}<button type="button" disabled={busy} onclick={() => viewingCalendar && resolveDetailConflict(viewingCalendar, "keepRemote")}>{translate(language,"keepRemoteVersion")}</button><button type="button" disabled={busy || !viewingCalendar.pendingRemote.retryLocalAllowed} title={!viewingCalendar.pendingRemote.retryLocalAllowed ? translate(language, "conflictRefreshRequired") : undefined} onclick={() => viewingCalendar && resolveDetailConflict(viewingCalendar, "retryLocal")}>{translate(language,"retryLocalChanges")}</button>{:else if modal === "calendar" && viewingCalendar?.pendingRemote?.status === "recoveryNeeded"}<span>{translate(language, "remoteRecoveryNeeded")}</span>{:else if modal === "calendar" && viewingCalendar?.pendingRemote}<button type="button" disabled={busy || viewingCalendar.pendingRemote.status === "conflict"} onclick={() => viewingCalendar && retryPendingRemote(viewingCalendar)}>{controlText(language, busy ? "processing" : viewingCalendar.pendingRemote.kind === "delete" ? "retryDelete" : "retrySave")}</button>{:else}<button type="submit" disabled={busy || remoteView?.busy || !title.trim()}>{controlText(language, busy || remoteView?.busy ? "saving" : "save")}</button>{/if}</div>
           </form>
       </div>
     </div>

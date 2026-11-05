@@ -39,8 +39,6 @@ const ICLOUD_CHINA_REGION: &str = "icloud-cn";
 
 #[allow(dead_code)]
 pub(crate) mod exact_probe;
-#[allow(dead_code)]
-pub(crate) mod probe_preflight;
 #[allow(dead_code)] // Used only after the deliberately unwired owner is composed.
 const MUTATION_TIMEOUT_MS: u64 = 30_000;
 
@@ -608,26 +606,6 @@ impl ProductionMutationSessions {
         )
     }
 
-    #[cfg(test)]
-    pub(crate) fn configure_creation_fixture(
-        &self,
-        account: &str,
-        executor: Arc<HttpDavExecutor>,
-        credentials: CredentialService,
-    ) {
-        let mut entries = self.sessions.lock().unwrap();
-        let session = Arc::get_mut(entries.entries.get_mut(account).unwrap())
-            .expect("no active transport handles");
-        session.executor = executor;
-        session.credentials = credentials;
-    }
-    #[cfg(test)]
-    pub(crate) fn poison_session_registry_for_test(&self) {
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = self.sessions.lock().unwrap();
-            panic!("poison production session registry for composition test");
-        }));
-    }
     pub(crate) fn new(
         accounts: Arc<AccountSourceRegistry>,
         database: Database,
@@ -662,76 +640,6 @@ impl ProductionMutationSessions {
         generation: u64,
     ) -> Result<u64, RemoteMutationTransportError> {
         self.register_attachment_cancellation(account_id, generation, None)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn register_probe_fixture(
-        &self,
-        account_id: &str,
-    ) -> Result<u64, RemoteMutationTransportError> {
-        self.register_probe_harness(
-            account_id,
-            crate::adapters::caldav_transport::DavCancellation::new(),
-        )
-    }
-
-    pub(in crate::adapters) fn register_probe_harness(
-        &self,
-        account_id: &str,
-        cancellation: crate::adapters::caldav_transport::DavCancellation,
-    ) -> Result<u64, RemoteMutationTransportError> {
-        // Diagnostic-only fixed owner. The Probe harness never runs product
-        // discovery, so it keeps the historical observed shard instead of
-        // claiming a persisted account binding it does not have.
-        const PROBE_ENTRY: &str = "https://p235-caldav.icloud.com.cn/";
-        const PROBE_SHARD: &str = "p235-caldav.icloud.com.cn";
-        let generation = self
-            .accounts
-            .attachment_generation(account_id)
-            .ok_or(RemoteMutationTransportError::Cancelled)?;
-        let profile = self
-            .accounts
-            .profile(account_id)
-            .map_err(|_| RemoteMutationTransportError::Cancelled)?;
-        if !profile.enabled
-            || !profile.credential_configured
-            || profile.region_profile != ICLOUD_CHINA_REGION
-            || !self.accounts.is_current_attachment(account_id, generation)
-        {
-            return Err(RemoteMutationTransportError::Cancelled);
-        }
-        let policy = DavTransportPolicy::new(std::collections::BTreeSet::from([
-            "caldav.icloud.com".to_owned(),
-            PROBE_SHARD.to_owned(),
-        ]))
-        .map_err(|_| RemoteMutationTransportError::UnsafeData)?;
-        let executor =
-            HttpDavExecutor::probe_harness(HttpDavConfig::default(), cancellation.clone())
-                .map_err(|_| RemoteMutationTransportError::Transient)?;
-        let mut transport = ProductionTitleMutationTransport::new(
-            account_id.to_owned(),
-            generation,
-            Url::parse(PROBE_ENTRY).map_err(|_| RemoteMutationTransportError::UnsafeData)?,
-            self.accounts.clone(),
-            self.database.clone(),
-            self.credentials.clone(),
-            self.clock.clone(),
-            policy,
-            Arc::new(executor),
-        )?;
-        transport.cancelled = Arc::new(AtomicBool::new(false));
-        let transport = Arc::new(transport);
-        let mut sessions = self
-            .sessions
-            .lock()
-            .map_err(|_| RemoteMutationTransportError::Cancelled)?;
-        if sessions.stopped || !self.accounts.is_current_attachment(account_id, generation) {
-            return Err(RemoteMutationTransportError::Cancelled);
-        }
-        if let Some(previous) = sessions.entries.insert(account_id.to_owned(), transport) {
-            previous.cancel_in_flight(account_id);
-        }
-        Ok(generation)
     }
 
     fn register_attachment_cancellation(
@@ -856,24 +764,6 @@ impl ProductionMutationSessions {
 
     /// Read-only joint check against this owner's exact captured concrete session.
     /// No registration, authentication, executor entry or request is performed.
-    pub(crate) fn probe_completion_session_matches(
-        &self,
-        account: &str,
-        route: &str,
-        captured: &crate::application::production_creation_owner::CreationSessionEvidence,
-    ) -> bool {
-        self.creation_session_evidence(account)
-            .is_ok_and(|fresh| fresh.same_owner(captured))
-            && self.session(account).is_ok_and(|session| {
-                !session.cancelled.load(Ordering::SeqCst)
-                    && session
-                        .policy
-                        .probe_collection_matches(&session.entry_url, route)
-                    && self
-                        .creation_session_evidence(account)
-                        .is_ok_and(|fresh| fresh.same_owner(captured))
-            })
-    }
 
     pub(crate) fn revoke(&self, account_id: &str) -> bool {
         let mut sessions = match self.sessions.lock() {

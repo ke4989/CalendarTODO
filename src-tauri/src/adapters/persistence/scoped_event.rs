@@ -63,6 +63,29 @@ impl ConfirmedTarget {
         self.predecessor.is_some()
     }
 }
+// A receipt retry proves the same immutable intent before skipping an obsolete
+// editor base. It grants no transport authority and still selects the live target.
+fn edit_replay(
+    c: &Connection,
+    input: &QueueRemoteEventUpdateV3,
+) -> Result<Option<(String, i64)>, PersistenceError> {
+    input.clone().validate()?;
+    let json = String::from_utf8(crate::domain::remote_event_update::encode_event_intent_v3(
+        &input.fields,
+    )?)
+    .map_err(|_| PersistenceError::RemoteMutationReadOnly)?;
+    let row = c.query_row("SELECT resource_id,intent_json,operation_id,created_at_ms FROM outbox_operations WHERE idempotency_key=?1 AND operation_kind='update_event' UNION ALL SELECT s.resource_id,s.intent_json,s.operation_id,COALESCE(o.created_at_ms,u.created_at_ms) FROM remote_update_submissions s LEFT JOIN outbox_operations o ON o.operation_id=s.operation_id LEFT JOIN remote_update_successors u ON u.operation_id=s.operation_id WHERE s.idempotency_key=?1",[&input.idempotency_key],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,i64>(3)?))).optional()?;
+    match row {
+        Some((resource, saved, operation, created))
+            if resource == input.resource_id && saved == json =>
+        {
+            Ok(Some((operation, created)))
+        }
+        Some(_) => Err(PersistenceError::IdempotencyConflict),
+        None => Ok(None),
+    }
+}
+
 pub(super) fn select_confirmed_target(
     c: &Connection,
     input: &ConfirmedTargetInput,
@@ -74,6 +97,7 @@ pub(super) fn select_confirmed_target(
         metadata,
     } = input
     {
+        let replay = edit_replay(c, update)?.is_some();
         let mut target =
             select_confirmed_target(c, &ConfirmedTargetInput::Update(update.clone()), actor)?;
         let raw = if let Some(head) = remote_update_successor::head(c, &update.resource_id)? {
@@ -88,7 +112,7 @@ pub(super) fn select_confirmed_target(
                 .4
                 .clone()
         };
-        if let Some(base) = base {
+        if let Some(base) = base.as_ref().filter(|_| !replay) {
             if !crate::domain::remote_event_update::selected_base_matches_v3(&raw, base)? {
                 return Err(PersistenceError::StaleSyncCapture);
             }
@@ -140,7 +164,9 @@ pub(super) fn select_confirmed_target(
                     &uid,
                     v.fields.time.is_some(),
                 )?;
-                crate::domain::remote_event_update::patch_single_utc_event_v3(&raw, &v.fields)?;
+                if edit_replay(c, v)?.is_none() {
+                    crate::domain::remote_event_update::patch_single_utc_event_v3(&raw, &v.fields)?;
+                }
             }
             ConfirmedTargetInput::Delete(_) => {
                 if parse_status != "parsed" {
@@ -203,6 +229,19 @@ pub(super) fn admit_confirmed_target(
     {
         if !connected_owner_current(Some(connected), &fresh.account, &fresh.route) {
             return Err(PersistenceError::RemoteAccountConnectionRequired);
+        }
+        if let Some((operation, created_at_ms)) = edit_replay(c, &update)? {
+            return Ok(ScopedEventSnapshot {
+                kind: crate::domain::remote_crud::RemoteCrudKind::UpdateEventV3,
+                operation,
+                account: fresh.account,
+                calendar: fresh.calendar,
+                resource: update.resource_id,
+                route: fresh.route,
+                actor,
+                created_at_ms,
+                recovery: false,
+            });
         }
         let tx = c.transaction()?;
         let operation = if target.is_successor() {
@@ -277,6 +316,55 @@ pub(crate) struct ScopedEventSnapshot {
     actor: std::sync::Weak<()>,
     created_at_ms: i64,
     recovery: bool,
+}
+
+/// Reconstruct only the identity of a durable unresolved conflict. This scope
+/// cannot restore a pending operation or grant execution authority.
+pub(super) fn capture_conflict(
+    c: &Connection,
+    identity: (
+        crate::domain::remote_crud::RemoteCrudKind,
+        &str,
+        &str,
+        &str,
+        &str,
+    ),
+    actor: std::sync::Weak<()>,
+) -> Result<ScopedEventSnapshot, PersistenceError> {
+    let (kind, operation, account, calendar, resource) = identity;
+    for id in [operation, account, calendar, resource] {
+        validate_account_id(id)?;
+    }
+    if actor.upgrade().is_none() {
+        return Err(PersistenceError::ActorUnavailable);
+    }
+    let sql = match kind {
+        crate::domain::remote_crud::RemoteCrudKind::UpdateEventV3 => {
+            "SELECT o.created_at_ms FROM outbox_operations o JOIN conflicts f ON f.operation_id=o.operation_id WHERE o.operation_id=?1 AND o.account_id=?2 AND o.calendar_id=?3 AND o.resource_id=?4 AND o.operation_kind='update_event' AND o.state='conflict' AND f.resolution_state='unresolved'"
+        }
+        crate::domain::remote_crud::RemoteCrudKind::Delete => {
+            "SELECT created_at_ms FROM remote_delete_operations WHERE operation_id=?1 AND account_id=?2 AND calendar_id=?3 AND resource_id=?4 AND state='conflict' AND resolution_state='unresolved'"
+        }
+        _ => return Err(PersistenceError::RemoteMutationReadOnly),
+    };
+    let created_at_ms = c
+        .query_row(sql, params![operation, account, calendar, resource], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .ok_or(PersistenceError::RemoteMutationReadOnly)?;
+    let route = selected_calendar_route(c, account, calendar)?;
+    Ok(ScopedEventSnapshot {
+        kind,
+        operation: operation.into(),
+        account: account.into(),
+        calendar: calendar.into(),
+        resource: resource.into(),
+        route,
+        actor,
+        created_at_ms,
+        recovery: true,
+    })
 }
 
 pub(super) fn restore(
@@ -634,8 +722,7 @@ pub(super) fn resolve(
         && state.resolution_state == Some(ConflictResolutionState::Unresolved)
         && choice == ConflictResolutionChoice::RetryLocal
     {
-        let blocked:bool=c.query_row("SELECT r.etag=o.base_etag FROM outbox_operations o JOIN remote_resources r ON r.resource_id=o.resource_id WHERE o.operation_kind='update_event' AND o.operation_id=?1 AND o.account_id=?2 AND o.calendar_id=?3 AND o.resource_id=?4",params![scope.operation,scope.account,scope.calendar,scope.resource],|r|r.get(0))?;
-        if blocked {
+        if !remote_update_fields::event_retry_eligible(c, &scope.operation)? {
             return Err(PersistenceError::ScopedEventRetryBlocked);
         }
     }

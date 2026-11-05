@@ -72,14 +72,21 @@ pub struct RemoteEventUpdateFieldsV3 {
     pub time: Option<UtcEventTimePair>,
 }
 impl RemoteEventUpdateFieldsV3 {
-    pub fn validate(mut self) -> Result<Self, Error> {
+    pub fn validate(self) -> Result<Self, Error> {
+        self.validate_fields(false)
+    }
+    fn validate_fields(mut self, historical: bool) -> Result<Self, Error> {
         let text = RemoteEventTextFieldsV2 {
             title: self.title.clone(),
             description: self.description.clone(),
             location: self.location.clone(),
         };
         if text.title.is_some() || text.description.is_some() || text.location.is_some() {
-            let text = text.validate()?;
+            let text = if historical {
+                text.validate_stored_text()?
+            } else {
+                text.validate()?
+            };
             self.title = text.title;
             self.description = text.description;
             self.location = text.location;
@@ -133,6 +140,27 @@ pub fn decode_event_intent_v3(json: &[u8]) -> Result<RemoteEventUpdateFieldsV3, 
     let stored: StoredIntent =
         serde_json::from_slice(json).map_err(|_| Error::CorruptStoredValue)?;
     if encode_event_intent_v3(&stored.fields).map_err(|_| Error::CorruptStoredValue)? != json {
+        return Err(Error::CorruptStoredValue);
+    }
+    Ok(stored.fields)
+}
+
+/// Presentation only: preserves canonical historical intent without granting
+/// admission, patch, claim or transport authority. All other old value bounds
+/// remain enforced; true malformed/noncanonical storage still reports corruption.
+pub(crate) fn decode_stored_event_intent_v3(
+    json: &[u8],
+) -> Result<RemoteEventUpdateFieldsV3, Error> {
+    if json.is_empty() || json.len() > MAX_EVENT_UPDATE_INTENT_BYTES {
+        return Err(Error::CorruptStoredValue);
+    }
+    let mut stored: StoredIntent =
+        serde_json::from_slice(json).map_err(|_| Error::CorruptStoredValue)?;
+    stored.fields = stored
+        .fields
+        .validate_fields(true)
+        .map_err(|_| Error::CorruptStoredValue)?;
+    if serde_json::to_vec(&stored).map_err(|_| Error::CorruptStoredValue)? != json {
         return Err(Error::CorruptStoredValue);
     }
     Ok(stored.fields)
@@ -596,7 +624,10 @@ pub(crate) fn selected_base_matches_v3(
     let matches = |selected: &Option<super::remote_mutation::RemoteOptionalTextUpdateV2>,
                    actual: &Option<String>| match selected {
         None => true,
-        Some(Clear) => actual.is_none(),
+        // Projection represents an explicitly empty TEXT property as absent.
+        // This base comparison follows that projection; patch/readback proof
+        // still preserves and checks the complete ICS resource.
+        Some(Clear) => actual.as_ref().is_none_or(String::is_empty),
         Some(Set(value)) => actual.as_ref() == Some(value),
     };
     Ok(fields.title.as_ref().is_none_or(|value| value == &title)

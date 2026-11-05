@@ -4,7 +4,6 @@ use crate::{
         DavTransportPolicy,
     },
     domain::{
-        account::{AccountProfile, ProviderKind, validate_account_id},
         calendar_sync::{
             AccountIncrementalStage, AccountInventoryStage, CalendarIncrementalStage,
             CalendarInventoryStage, IncrementalSyncRequest, ParseStatus, StagedResource,
@@ -12,12 +11,7 @@ use crate::{
         },
         remote_mutation::resource_belongs_to_collection,
     },
-    ports::{
-        caldav::{
-            CalDavSourceFactory, ProviderReadError, ReadOnlyCalendarSource, SourceFactoryError,
-        },
-        credentials::CredentialRecord,
-    },
+    ports::caldav::{ProviderReadError, ReadOnlyCalendarSource},
 };
 use quick_xml::{Reader, XmlVersion, events::Event};
 use std::{
@@ -26,12 +20,11 @@ use std::{
 };
 use url::Url;
 mod icloud;
-#[cfg(test)]
-#[path = "icloud_caldav_tests.rs"]
-mod icloud_tests;
+mod range;
 pub(crate) use icloud::discover_icloud;
 
 const REQUEST_TIMEOUT_MS: u64 = 30_000;
+const MAX_CONCURRENT_RESOURCE_GETS: usize = 4;
 const DISCOVERY_BODY: &[u8] = br#"<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><d:current-user-principal/><d:principal-URL/><c:calendar-home-set/></d:prop></d:propfind>"#;
 const CALENDARS_BODY: &[u8] = br#"<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:a="http://apple.com/ns/ical/"><d:prop><d:displayname/><d:resourcetype/><a:calendar-color/><d:current-user-privilege-set/><c:supported-calendar-component-set/></d:prop></d:propfind>"#;
 const INVENTORY_BODY: &[u8] =
@@ -263,134 +256,6 @@ pub fn discover_vevent_collections(
 
 /// Backend-only synthetic factory used to exercise the complete application
 /// orchestration path without selecting or constructing a network client.
-pub struct ScriptedCalDavSourceFactory {
-    account_id: String,
-    region_profile: String,
-    entry_url: String,
-    trusted_hosts: BTreeSet<String>,
-    calendar_ids_by_href: BTreeMap<String, String>,
-    executor: Arc<dyn DavExecutor>,
-    observed_at_ms: i64,
-    calendar_scope: Option<CalendarScopeReader>,
-}
-
-impl ScriptedCalDavSourceFactory {
-    pub fn new(
-        account_id: String,
-        region_profile: String,
-        entry_url: String,
-        trusted_hosts: BTreeSet<String>,
-        calendar_ids_by_href: BTreeMap<String, String>,
-        executor: Arc<dyn DavExecutor>,
-        observed_at_ms: i64,
-    ) -> Result<Self, SourceFactoryError> {
-        if validate_account_id(&account_id).is_err()
-            || region_profile.trim().is_empty()
-            || calendar_ids_by_href
-                .values()
-                .any(|calendar_id| validate_account_id(calendar_id).is_err())
-            || observed_at_ms < 0
-        {
-            return Err(SourceFactoryError::UnsafeConfiguration);
-        }
-        DavTransportPolicy::new(trusted_hosts.clone())
-            .map_err(|_| SourceFactoryError::UnsafeConfiguration)?;
-        let entry = Url::parse(&entry_url).map_err(|_| SourceFactoryError::UnsafeConfiguration)?;
-        DavRequest::new(
-            DavMethod::Get,
-            entry.clone(),
-            Vec::new(),
-            DavDepth::Zero,
-            REQUEST_TIMEOUT_MS,
-        )
-        .map_err(|_| SourceFactoryError::UnsafeConfiguration)?;
-        if !entry
-            .host_str()
-            .is_some_and(|host| trusted_hosts.contains(host))
-        {
-            return Err(SourceFactoryError::UnsafeConfiguration);
-        }
-        let mut calendar_ids = BTreeSet::new();
-        for (href, calendar_id) in &calendar_ids_by_href {
-            let collection = entry
-                .join(href)
-                .map_err(|_| SourceFactoryError::UnsafeConfiguration)?;
-            DavRequest::new(
-                DavMethod::Get,
-                collection.clone(),
-                Vec::new(),
-                DavDepth::Zero,
-                REQUEST_TIMEOUT_MS,
-            )
-            .map_err(|_| SourceFactoryError::UnsafeConfiguration)?;
-            if !collection
-                .host_str()
-                .is_some_and(|host| trusted_hosts.contains(host))
-                || !calendar_ids.insert(calendar_id)
-            {
-                return Err(SourceFactoryError::UnsafeConfiguration);
-            }
-        }
-        Ok(Self {
-            account_id,
-            region_profile,
-            entry_url,
-            trusted_hosts,
-            calendar_ids_by_href,
-            executor,
-            observed_at_ms,
-            calendar_scope: None,
-        })
-    }
-
-    pub fn with_calendar_scope(mut self, calendar_scope: CalendarScopeReader) -> Self {
-        self.calendar_scope = Some(calendar_scope);
-        self
-    }
-}
-
-impl CalDavSourceFactory for ScriptedCalDavSourceFactory {
-    fn build(
-        &self,
-        profile: &AccountProfile,
-        credential: &CredentialRecord,
-    ) -> Result<Arc<dyn ReadOnlyCalendarSource + Send + Sync>, SourceFactoryError> {
-        if profile.provider_kind != ProviderKind::CalDav {
-            return Err(SourceFactoryError::Unsupported);
-        }
-        if !profile.enabled
-            || profile.account_id != self.account_id
-            || profile.region_profile != self.region_profile
-        {
-            return Err(SourceFactoryError::UnsafeConfiguration);
-        }
-        let context = AdapterAccountContext {
-            account_id: profile.account_id.clone(),
-            provider_kind: profile.provider_kind.as_str().to_owned(),
-            user_label: profile.user_label.clone(),
-            credential_ref: profile.credential_ref.clone(),
-            region_profile: profile.region_profile.clone(),
-            trusted_hosts: self.trusted_hosts.clone(),
-            calendar_ids_by_href: self.calendar_ids_by_href.clone(),
-        };
-        let mut adapter = ExecutingCalDavAdapter::new(
-            context,
-            &self.entry_url,
-            DavAuthentication::from_credential(credential),
-            self.executor.clone(),
-            self.observed_at_ms,
-        )
-        .map_err(|error| match error {
-            ProviderReadError::Unauthorized => SourceFactoryError::Unauthorized,
-            ProviderReadError::Transient => SourceFactoryError::Unavailable,
-            ProviderReadError::Incomplete
-            | ProviderReadError::UnsafeData
-            | ProviderReadError::InvalidSyncToken => SourceFactoryError::UnsafeConfiguration,
-        })?;
-        adapter.calendar_scope = self.calendar_scope.clone();
-        Ok(Arc::new(adapter))
-    }
-}
 
 impl ExecutingCalDavAdapter {
     pub fn new(
@@ -415,8 +280,15 @@ impl ExecutingCalDavAdapter {
         })
     }
 
+    /// Fresh Depth-0 metadata only, for the explicit read-only Probe entry.
+    /// This grants neither import nor mutation authority.
+
+    /// One exact read after the harness's current-run applied deletion proof.
+    /// Caller retains the actor-validated original CREATE snapshot in memory.
     /// Development Probe source: use already committed exact collection routes.
     /// No principal, home or account collection discovery is performed.
+    /// Tokens are observations for explicit non-promoting Probe comparisons;
+    /// the normal partial-pair stage deliberately continues to publish None.
 
     fn scoped_context(&self) -> Result<AdapterAccountContext, ProviderReadError> {
         let mut context = self.context.clone();
@@ -429,6 +301,27 @@ impl ExecutingCalDavAdapter {
         Ok(context)
     }
 
+    fn execute_range(
+        &self,
+        method: DavMethod,
+        url: Url,
+        body: Vec<u8>,
+        depth: DavDepth,
+        cancellation: &crate::adapters::caldav_transport::DavCancellation,
+    ) -> Result<crate::adapters::caldav_transport::DavResponse, ProviderReadError> {
+        let current = self.scoped_context()?;
+        let binding = self
+            .icloud_binding
+            .as_ref()
+            .ok_or(ProviderReadError::UnsafeData)?;
+        let request = DavRequest::new(method, url, body, depth, REQUEST_TIMEOUT_MS)
+            .map_err(map_execution_error)?
+            .with_cancellation(cancellation.clone());
+        DavTransportPolicy::icloud_bound(binding, current.calendar_ids_by_href.into_keys())
+            .map_err(map_execution_error)?
+            .execute(self.executor.as_ref(), request, &self.authentication)
+            .map_err(map_execution_error)
+    }
     fn execute(
         &self,
         method: DavMethod,
@@ -451,6 +344,85 @@ impl ExecutingCalDavAdapter {
         self.policy
             .execute(self.executor.as_ref(), request, &self.authentication)
             .map_err(map_execution_error)
+    }
+
+    /// Fetch one complete collection in bounded waves. All targets are checked
+    /// before dispatch; every request still rechecks the current source scope.
+    /// Joining the whole wave retains deterministic order and never leaves reads
+    /// running after a failed stage or cancels the reusable attachment token.
+    fn fetch_resources(
+        &self,
+        collection: &Url,
+        items: &[InventoryItem],
+        execute: impl Fn(
+            Url,
+        )
+            -> Result<crate::adapters::caldav_transport::DavResponse, ProviderReadError>
+        + Sync,
+    ) -> Result<Vec<FetchedResource>, ProviderReadError> {
+        let targets = items
+            .iter()
+            .map(|item| {
+                if !resource_belongs_to_collection(collection.as_str(), &item.href) {
+                    return Err(ProviderReadError::UnsafeData);
+                }
+                if self.icloud_binding.is_some() {
+                    super::icloud_caldav::resolve(collection, &item.href)
+                        .map_err(map_execution_error)
+                } else {
+                    collection
+                        .join(&item.href)
+                        .map_err(|_| ProviderReadError::UnsafeData)
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut fetched = Vec::with_capacity(items.len());
+        for (item_wave, target_wave) in items
+            .chunks(MAX_CONCURRENT_RESOURCE_GETS)
+            .zip(targets.chunks(MAX_CONCURRENT_RESOURCE_GETS))
+        {
+            let wave = std::thread::scope(|scope| {
+                let execute = &execute;
+                let workers = item_wave
+                    .iter()
+                    .zip(target_wave)
+                    .map(|(item, target)| {
+                        scope.spawn(move || {
+                            let response = execute(target.clone())?;
+                            require_resource_status(response.status())?;
+                            Ok(FetchedResource {
+                                href: item.href.clone(),
+                                status: response.status(),
+                                content_type: response
+                                    .content_type()
+                                    .unwrap_or_default()
+                                    .to_owned(),
+                                body: response.body().to_vec(),
+                                etag: Some(staged_revision(response.etag(), &item.etag)?),
+                            })
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                workers
+                    .into_iter()
+                    .map(|worker| worker.join().expect("resource read worker panicked"))
+                    .collect::<Vec<Result<FetchedResource, ProviderReadError>>>()
+            });
+            for result in wave {
+                fetched.push(result?);
+            }
+            // A cancellation or ownership loss while a wave was running must
+            // reject the stage, not return a complete-looking prefix or start
+            // another wave.
+            if self
+                .executor
+                .cancellation()
+                .is_some_and(|cancellation| cancellation.is_cancelled())
+            {
+                return Err(ProviderReadError::Transient);
+            }
+        }
+        Ok(fetched)
     }
 
     fn collect_full_from_transport(&self) -> Result<AccountInventoryStage, ProviderReadError> {
@@ -518,30 +490,10 @@ impl ExecutingCalDavAdapter {
             require_read_status(inventory_response.status())?;
             let inventory = parse_inventory(inventory_response.body(), &calendar.href)?;
             let sync_token = parse_optional_sync_token(inventory_response.body(), &calendar.href)?;
-            let mut fetched_resources = Vec::with_capacity(inventory.len());
-            for item in inventory {
-                let resource_url = inventory_response
-                    .final_url()
-                    .join(&item.href)
-                    .map_err(|_| ProviderReadError::UnsafeData)?;
-                let response =
-                    self.execute(DavMethod::Get, resource_url, Vec::new(), DavDepth::Zero)?;
-                require_resource_status(response.status())?;
-                // The exact-target GET returns its own revision label together
-                // with its own body. A provider may re-serialize or relabel a
-                // resource after the inventory read; that difference is not a
-                // safety contradiction, and rejecting the whole stage here
-                // would block the account's synchronization permanently. The
-                // body is never paired with the older inventory label: the
-                // fetched label wins and stays bounded/validated while staging.
-                fetched_resources.push(FetchedResource {
-                    href: item.href,
-                    status: response.status(),
-                    content_type: response.content_type().unwrap_or_default().to_owned(),
-                    body: response.body().to_vec(),
-                    etag: response.etag().map(str::to_owned),
-                });
-            }
+            let fetched_resources =
+                self.fetch_resources(inventory_response.final_url(), &inventory, |target| {
+                    self.execute(DavMethod::Get, target, Vec::new(), DavDepth::Zero)
+                })?;
             calendars.push(CalendarFixture {
                 collection_href: calendar.href,
                 inventory_xml: inventory_response.body().to_vec(),
@@ -610,31 +562,10 @@ impl ExecutingCalDavAdapter {
                     }
                     Err(error) => return Err(error),
                 };
-                fetched_resources.reserve(parsed.changed.len());
-                for item in parsed.changed {
-                    let resource_url = if self.icloud_binding.is_some() {
-                        super::icloud_caldav::resolve(report.final_url(), &item.href)
-                            .map_err(map_execution_error)?
-                    } else {
-                        report
-                            .final_url()
-                            .join(&item.href)
-                            .map_err(|_| ProviderReadError::UnsafeData)?
-                    };
-                    let response =
-                        self.execute(DavMethod::Get, resource_url, Vec::new(), DavDepth::Zero)?;
-                    require_resource_status(response.status())?;
-                    // Same rule as the full inventory: the fetched revision
-                    // label belongs with the fetched body instead of failing
-                    // the whole account stage on a provider relabel.
-                    fetched_resources.push(FetchedResource {
-                        href: item.href,
-                        status: response.status(),
-                        content_type: response.content_type().unwrap_or_default().to_owned(),
-                        body: response.body().to_vec(),
-                        etag: response.etag().map(str::to_owned),
-                    });
-                }
+                fetched_resources =
+                    self.fetch_resources(report.final_url(), &parsed.changed, |target| {
+                        self.execute(DavMethod::Get, target, Vec::new(), DavDepth::Zero)
+                    })?;
             }
             calendars.push(CalendarIncrementalFixture {
                 collection_href,
@@ -664,6 +595,12 @@ impl ExecutingCalDavAdapter {
 }
 
 impl ReadOnlyCalendarSource for ExecutingCalDavAdapter {
+    fn collect_calendar_range(
+        &self,
+        request: &crate::ports::calendar_range::CalendarRangeRequest,
+    ) -> Result<crate::ports::calendar_range::CalendarRangeSegment, ProviderReadError> {
+        range::collect(self, request)
+    }
     fn account_id(&self) -> &str {
         &self.context.account_id
     }
@@ -700,8 +637,7 @@ fn map_execution_error(error: DavExecutionError) -> ProviderReadError {
         | DavExecutionError::InvalidResponse
         | DavExecutionError::UnsafeRedirect
         | DavExecutionError::TooManyRedirects
-        | DavExecutionError::ResponseTooLarge
-        | DavExecutionError::ScriptMismatch => ProviderReadError::UnsafeData,
+        | DavExecutionError::ResponseTooLarge => ProviderReadError::UnsafeData,
     }
 }
 

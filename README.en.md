@@ -38,9 +38,11 @@ Keep a smaller view of your tasks in desktop companion or always-on-top mode.
 
 - **Calendars and tasks** — Organize local items by calendar, with dates, notes, tags, pinning and fixed recurrence.
 - **Windows desktop list** — A compact separate window with collapse controls, adjustable background opacity and tray shortcuts.
-- **iCloud Calendar** — Choose calendars to display and synchronize. Enable remote editing to create, update and delete eligible events.
-- **Everyday editing** — Drag to reorder and mark items complete. Event edits save automatically.
+- **iCloud Calendar** — Choose calendars to display and synchronize. Enable remote editing to create, update and delete eligible events. A conflict can keep the remote version; a blocked local edit is not written over it and can be retried only as a successor version.
 - **Reminders and appearance** — Windows due reminders while the app is running, Chinese and English UI text, two palettes, and light, dark or system appearance.
+- **Agenda search** — Find local tasks and cached iCloud events. The search covers event titles, locations, notes and similar fields.
+- **Everyday editing** — Drag to reorder and mark items complete. Event edits save automatically.
+- **Local calendar deletion** — Delete a local calendar and its items.
 
 ## Download and install
 
@@ -113,7 +115,7 @@ Use `npm run tauri -- dev` for development mode.
 
 Original Calendar TODO contributions are licensed under the [MIT License](LICENSE), Copyright (c) 2026 ke4989. The application and installers provide complete license texts for offline viewing. [Microsoft component conditions](src/lib/legal/MICROSOFT_COMPONENT_TERMS.txt) apply only within their stated scope and do not change the MIT licensing of original project contributions. Installation requires explicit agreement to applicable terms; unattended deployment requires the acceptance parameter documented in the [installation guide](doc/INSTALL.en.md). Third-party code, icons, and installer components retain their respective licenses; see the [third-party notices](doc/THIRD_PARTY_NOTICES.md) and the complete [THIRD_PARTY_NOTICES.txt](src/lib/legal/THIRD_PARTY_NOTICES.txt). Installer redistribution must also follow applicable component conditions and source-companion requirements described in the [installation guide](doc/INSTALL.en.md).
 
-Development used [Codex](https://openai.com/codex/), [Pi](https://pi.dev/), and the [impeccable](https://github.com/pbakaus/impeccable) / [UI UX Pro Max](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill) design skills for the UI. Thanks also to [magpie](https://github.com/yetone/magpie) and the free Deepseek credits from [Workbuddy](https://www.workbuddy.cn/events/invite?inviteCode=732a87vsu6y). Their source and license boundaries are recorded in the third-party notices. TAURI is a trademark of The Tauri Programme within the Commons Conservancy. Apple, iCloud, Windows and Microsoft Edge WebView2 names describe compatibility and platform dependencies. Calendar TODO is an independent project and is not endorsed by those organizations.
+Development used [Pi](https://pi.dev/), [Codex](https://openai.com/codex/), and the [impeccable](https://github.com/pbakaus/impeccable) / [UI UX Pro Max](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill) design skills for the UI. Thanks also to [magpie](https://github.com/yetone/magpie) and the free Deepseek credits from [Workbuddy](https://www.workbuddy.cn/events/invite?inviteCode=732a87vsu6y). Their source and license boundaries are recorded in the third-party notices. TAURI is a trademark of The Tauri Programme within the Commons Conservancy. Apple, iCloud, Windows and Microsoft Edge WebView2 names describe compatibility and platform dependencies. Calendar TODO is an independent project and is not endorsed by those organizations.
 
 ## Documentation
 

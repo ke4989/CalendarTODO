@@ -9,5 +9,7 @@ pub mod remote_creation;
 pub mod remote_crud;
 pub mod remote_event_update;
 pub mod remote_mutation;
+pub mod search;
+pub mod search_workspace;
 pub mod settings;
 pub mod window_placement;

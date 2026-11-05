@@ -70,7 +70,7 @@ export interface UpdateAppSettings {
 export type UpdateCheckResult = { status: "upToDate" } | { status: "available"; version: string };
 export type RuntimeAccountStatus = "disabled" | "actionRequired" | "ready";
 export type AccountActionRequired = "credentialSetup" | "sourceAttachment";
-export type SourceAttachmentMode = "synthetic" | "icloudChinaReadOnly";
+export type SourceAttachmentMode = "icloudChinaReadOnly";
 export type AttachmentState = "detached" | "attaching" | "ready" | "actionRequired" | "failed";
 export type AttachmentFailure = "credential" | "disabled" | "unsafeConfiguration" | "unavailable";
 export interface AttachmentView { accountId: string; sourceMode: SourceAttachmentMode | null; state: AttachmentState; failure: AttachmentFailure | null; }
@@ -245,8 +245,8 @@ export interface LocalTodoCompletionChanged { todoId: string; previousOccurrence
 export interface LocalCalendar { calendarId: string; name: string; color: string; isDefault: boolean; hidden: boolean; displayPastDays: number | null; displayFutureDays: number | null; }
 export interface SaveLocalCalendar { calendarId: string | null; name: string; color: string; displayPastDays: number | null; displayFutureDays: number | null; }
 export interface SetLocalCalendarHidden { calendarId: string; hidden: boolean; }
-export interface DeleteLocalCalendar { calendarId: string; }
-export interface DeletedLocalCalendar { movedTodos: number; }
+export interface DeleteLocalCalendar { calendarId: string; confirmation: "confirmed"; }
+export interface DeletedLocalCalendar { deletedTodos: number; }
 
 export interface Tag { tagId: string; name: string; }
 
@@ -302,6 +302,8 @@ export interface IpcError {
 export type CalendarProjectionStatus = "ready" | "unsupported";
 export type CalendarUnsupportedReason = "invalidStructure" | "unsupportedRecurrence" | "unsupportedTime" | "invalidData";
 export interface AgendaRefreshNotice { reason: "recurrenceHorizon" | "calendarSync"; }
+/** Shared process-session view choice; independent of stored visibility/sync. */
+export interface CalendarDisplaySelection { version: number; hiddenCalendarIds: string[]; }
 
 export interface CalendarAgendaItem {
   remoteEditEligible?: boolean;
@@ -332,9 +334,14 @@ export interface CalendarAgendaItem {
     operationId: string;
     accountId: string;
     kind: "createUtcV2" | "updateEventV3" | "delete";
-    status: "pending" | "retryNeeded" | "conflict";
+    status: "pending" | "retryNeeded" | "conflict" | "recoveryNeeded";
+    retryLocalAllowed?: boolean;
   } | null;
 }
+export interface SearchQuery { text: string; includeCompleted: boolean }
+export type SearchHit = { kind: "todo"; item: LocalTodo } | { kind: "calendar"; item: CalendarAgendaItem };
+export interface SearchResults { hits: SearchHit[]; truncated: boolean }
+
 export interface CalendarCompletionChanged { seriesId: string; previousRecurrenceKey: string; completed: boolean; item: CalendarAgendaItem; }
 export interface CalendarFixedRecurrence { frequency: RecurrenceFrequency; interval: number; options?: RecurrenceOptions; }
 export interface UpdateCalendarLocalMetadata {

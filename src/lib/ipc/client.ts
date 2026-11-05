@@ -34,6 +34,18 @@ export function listCalendarAgendaItems(): Promise<CalendarAgendaItem[]> {
   return invoke<CalendarAgendaItem[]>("list_calendar_agenda_items");
 }
 
+export function searchItems(query: import("./contracts").SearchQuery): Promise<import("./contracts").SearchResults> {
+  return invoke("search_items", { query });
+}
+
+export const calendarDisplaySelectionEvent = "calendar-todo://calendar-display-selection-changed";
+export function getCalendarDisplaySelection(): Promise<import("./contracts").CalendarDisplaySelection> {
+  return invoke("get_calendar_display_selection");
+}
+export function setCalendarDisplaySelection(hiddenCalendarIds: string[]): Promise<import("./contracts").CalendarDisplaySelection> {
+  return invoke("set_calendar_display_selection", { hiddenCalendarIds });
+}
+
 export function listCalendarSettings(): Promise<CalendarSettingsView[]> {
   return invoke<CalendarSettingsView[]>("list_calendar_settings");
 }

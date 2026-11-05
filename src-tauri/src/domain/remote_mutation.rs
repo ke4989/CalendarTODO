@@ -374,6 +374,8 @@ pub struct RemoteConflictSummary {
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteMutationError {
+    #[error("description cannot end a line with a backslash")]
+    InvalidDescription,
     #[error("remote mutation identity is invalid")]
     InvalidIdentity,
     #[error("remote event title is invalid")]
@@ -653,7 +655,13 @@ impl QueueRemoteEventTextUpdateV2 {
     }
 }
 impl RemoteEventTextFieldsV2 {
-    pub fn validate(mut self) -> Result<Self, RemoteMutationError> {
+    pub fn validate(self) -> Result<Self, RemoteMutationError> {
+        self.validate_text(false)
+    }
+    pub(crate) fn validate_stored_text(self) -> Result<Self, RemoteMutationError> {
+        self.validate_text(true)
+    }
+    fn validate_text(mut self, historical: bool) -> Result<Self, RemoteMutationError> {
         if self.title.is_none() && self.description.is_none() && self.location.is_none() {
             return Err(RemoteMutationError::UnsafeCalendarData);
         }
@@ -665,7 +673,7 @@ impl RemoteEventTextFieldsV2 {
             validate_v2_title(title)?;
         }
         if let Some(RemoteOptionalTextUpdateV2::Set(description)) = &mut self.description {
-            *description = normalize_v2_description(description)?;
+            *description = normalize_description(description, historical)?;
         }
         if let Some(RemoteOptionalTextUpdateV2::Set(location)) = &self.location {
             validate_v2_location(location)?;
@@ -707,8 +715,25 @@ pub(crate) fn validate_v2_location(location: &str) -> Result<&str, RemoteMutatio
     }
     Ok(location)
 }
+/// A literal backslash immediately before a newline escapes to `\\`+`\n`, which
+/// iCloud re-encodes as `\\`+`\\`+`n`: the newline becomes a letter and the
+/// stored value changes. Reject that one pattern locally instead of submitting
+/// content the server rewrites.
+pub(crate) fn description_ends_line_with_backslash(description: &str) -> bool {
+    description.contains("\\\n")
+}
+
 pub(crate) fn normalize_v2_description(description: &str) -> Result<String, RemoteMutationError> {
+    normalize_description(description, false)
+}
+fn normalize_description(
+    description: &str,
+    historical: bool,
+) -> Result<String, RemoteMutationError> {
     let normalized = description.replace("\r\n", "\n");
+    if !historical && description_ends_line_with_backslash(&normalized) {
+        return Err(RemoteMutationError::InvalidDescription);
+    }
     if normalized.is_empty()
         || normalized.chars().count() > 4096
         || normalized.len() > 12 * 1024

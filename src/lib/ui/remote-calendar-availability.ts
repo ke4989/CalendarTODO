@@ -12,7 +12,9 @@ const blockedReasonEnglish: Record<string, string> = {
   "日历地址不符合当前 iCloud 来源策略": "This calendar address does not match the current iCloud source policy.",
   "此事件仅可查看": "This event is read-only.",
   "邀请、重复、全天或不支持的事件仅可查看": "Invitations, recurring, all-day, or unsupported events are read-only.",
-  "此事件有待完成的同步操作": "This event already has a pending synchronization operation."
+  "此事件有待完成的同步操作": "This event already has a pending synchronization operation.",
+  "待同步修改数据损坏（CorruptStoredValue），原记录已保留，需要恢复": "Pending changes are corrupt (CorruptStoredValue); the original record is retained and needs recovery.",
+  "历史待同步修改不符合当前发送规则，原修改已保留，需要恢复": "Historical pending changes do not meet current sending rules; the changes are retained and need recovery."
 };
 
 function localizedBlockedReason(value: string | null | undefined, fallback: string): string {

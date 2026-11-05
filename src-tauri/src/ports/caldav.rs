@@ -10,6 +10,12 @@ use thiserror::Error;
 /// inventory that still requires domain validation before promotion.
 pub trait ReadOnlyCalendarSource {
     fn account_id(&self) -> &str;
+    fn collect_calendar_range(
+        &self,
+        _request: &super::calendar_range::CalendarRangeRequest,
+    ) -> Result<super::calendar_range::CalendarRangeSegment, ProviderReadError> {
+        Err(ProviderReadError::UnsafeData)
+    }
     fn collect_full_inventory(&self) -> Result<AccountInventoryStage, ProviderReadError>;
     fn collect_incremental(
         &self,

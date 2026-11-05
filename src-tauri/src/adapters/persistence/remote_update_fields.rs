@@ -629,6 +629,37 @@ fn usable(operation: &Operation) -> Result<(), PersistenceError> {
     }
     Ok(())
 }
+fn retry_revision_eligible(
+    kind: UpdateKind,
+    current: &str,
+    raw: &[u8],
+    base: &str,
+    remote: &RemoteReadBack,
+) -> bool {
+    current != base
+        && strong_mutation_etag(current)
+        && (current != remote.etag || (kind != UpdateKind::EventV3 && raw == remote.raw_ics))
+}
+
+pub(super) fn event_retry_eligible(c: &Connection, id: &str) -> Result<bool, PersistenceError> {
+    let operation = load(c, id, UpdateKind::EventV3)?;
+    let remote = c.query_row("SELECT remote_etag,remote_raw_ics FROM conflicts WHERE operation_id=?1 AND resolution_state='unresolved'", [id], |r| Ok(RemoteReadBack { etag: r.get(0)?, raw_ics: r.get(1)? })).optional()?;
+    let Some(remote) = remote else {
+        return Ok(false);
+    };
+    Ok(operation.state == "conflict"
+        && usable(&operation).is_ok()
+        && expected(&operation).is_ok()
+        && safe_changed_remote(&operation, &remote).is_ok()
+        && retry_revision_eligible(
+            UpdateKind::EventV3,
+            &operation.current_etag,
+            &operation.current_raw,
+            &operation.captured.base_etag,
+            &remote,
+        ))
+}
+
 fn same_capture(current: &RemoteFieldsMutationClaim, issued: &RemoteFieldsMutationClaim) -> bool {
     current.operation_id == issued.operation_id
         && current.account_id == issued.account_id
@@ -1061,14 +1092,13 @@ pub(super) fn resolve_kind(
         None
     } else {
         usable(&operation)?;
-        if operation.current_etag == claim.base_etag
-            || !strong_mutation_etag(&operation.current_etag)
-            || (operation.current_etag == recorded_remote.etag
-                && operation.current_raw != recorded_remote.raw_ics)
-        {
-            return Err(PersistenceError::RemoteMutationReadOnly);
-        }
-        if kind == UpdateKind::EventV3 && operation.current_etag == recorded_remote.etag {
+        if !retry_revision_eligible(
+            kind,
+            &operation.current_etag,
+            &operation.current_raw,
+            &claim.base_etag,
+            &recorded_remote,
+        ) {
             return Err(PersistenceError::RemoteMutationReadOnly);
         }
         let retry_intent = if let Some((_, _, json, _, _)) = &successor {

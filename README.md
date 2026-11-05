@@ -38,9 +38,11 @@ Calendar TODO 是一个面向 Windows 的日程与待办工具。既能接入 iC
 
 - **日历与待办**：按本地日历分类，设置时间、备注、标签、置顶和固定周期重复。
 - **Windows 桌面清单**：独立的紧凑视图，支持折叠、背景不透明度调整和托盘快捷操作。
-- **iCloud 日历**：选择需要显示与同步的日历；开启远程编辑后，可创建、修改和删除符合条件的日程。
-- **顺手的日常操作**：拖动调整顺序、标记完成；日程事项编辑后自动保存。
+- **iCloud 日历**：选择需要显示与同步的日历；开启远程编辑后，可创建、修改和删除符合条件的日程。同步冲突时可以保留远端版本；被阻止的本地修改不会直接覆盖远端，只能作为后续版本重试。
 - **通知与外观**：应用运行时提供 Windows 到期提醒，支持中英文界面、两套配色以及浅色、深色和跟随系统模式。
+- **日程搜索**：查找本地事项和已缓存的 iCloud 日程，搜索范围包括日程标题、地点、备注等。
+- **顺手的日常操作**：拖动调整顺序、标记完成；日程事项编辑后自动保存。
+- **本地日历删除**：可删除本地日历及其事项。
 
 ## 下载与安装
 
@@ -113,7 +115,7 @@ Tauri 会先构建前端，再构建应用和安装包。默认产物位于 `src
 
 Calendar TODO 的原创贡献采用 [MIT License](LICENSE)，Copyright (c) 2026 ke4989。应用及安装器提供完整的离线许可文本；[Microsoft 组件附加条件](src/lib/legal/MICROSOFT_COMPONENT_TERMS.txt) 仅适用于其声明范围，不改变项目原创代码的 MIT 授权。安装时须明确同意适用条款，静默部署须按[安装指南](doc/INSTALL.md)传入同意参数。第三方代码、图标和安装器组件保留各自许可，详见[第三方声明](doc/THIRD_PARTY_NOTICES.md)及完整的 [THIRD_PARTY_NOTICES.txt](src/lib/legal/THIRD_PARTY_NOTICES.txt)。安装器再分发时还应遵守相关组件的条件和源码配套要求，详见[安装指南](doc/INSTALL.md)。
 
-开发使用了 [Codex](https://openai.com/codex/) 、[Pi](https://pi.dev/) 及 [impeccable](https://github.com/pbakaus/impeccable) / [UI UX Pro Max](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill) 进行 UI 设计，同时感谢 [magpie](https://github.com/yetone/magpie) 以及来自 [Workbuddy](https://www.workbuddy.cn/events/invite?inviteCode=732a87vsu6y) 的免费 Deepseek 额度。相关来源与许可边界见第三方声明。TAURI 是 The Tauri Programme within the Commons Conservancy 的商标；Apple、iCloud、Windows 与 Microsoft Edge WebView2 名称仅用于说明兼容性和平台依赖。Calendar TODO 是独立项目，未获这些组织背书。
+开发使用了 [Pi](https://pi.dev/) 、[Codex](https://openai.com/codex/) 及 [impeccable](https://github.com/pbakaus/impeccable) / [UI UX Pro Max](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill) 进行 UI 设计，同时感谢 [magpie](https://github.com/yetone/magpie) 以及来自 [Workbuddy](https://www.workbuddy.cn/events/invite?inviteCode=732a87vsu6y) 的免费 Deepseek 额度。相关来源与许可边界见第三方声明。TAURI 是 The Tauri Programme within the Commons Conservancy 的商标；Apple、iCloud、Windows 与 Microsoft Edge WebView2 名称仅用于说明兼容性和平台依赖。Calendar TODO 是独立项目，未获这些组织背书。
 
 ## 文档
 

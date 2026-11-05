@@ -313,6 +313,12 @@ fn run(
                     continue;
                 };
                 for job in jobs {
+                    if !database
+                        .notification_delivery_current(&job)
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
                     let delivered = delivery.deliver(&job).is_ok();
                     let _ = database.finish_notification_job(job.job_id, delivered, now);
                 }

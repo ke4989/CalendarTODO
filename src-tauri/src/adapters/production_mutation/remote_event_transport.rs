@@ -165,12 +165,13 @@ impl ProductionEventTransport {
             )
             .map_err(|_| RemoteMutationTransportError::UnsafeData)?;
         let auth = s.authentication(claim.account_id())?;
-        classify_conditional_update_result(s.executor.execute_event_guarded(
+        let result = s.executor.execute_event_guarded(
             request,
             &auth,
             &CompleteEventTransportAuthorization(()),
             &live,
-        ))
+        );
+        classify_conditional_update_result(result)
     }
     pub(crate) fn get(
         &self,

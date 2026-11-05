@@ -90,23 +90,7 @@ impl HttpDavConfig {
 /// One HTTPS exchange. The real implementation owns the pinned client; tests
 /// inject deterministic responses through the same contract.
 pub(crate) trait DavHttpExchange: Send + Sync {
-    fn exchange_probe_acquisition_guarded(
-        &self,
-        _request: &HttpExchangeRequest,
-        _cancellation: &DavCancellation,
-        _accept: &dyn Fn() -> bool,
-    ) -> Result<RawDavResponse, DavExecutionError> {
-        Err(DavExecutionError::InvalidRequest)
-    }
     // Unreviewed exchange implementations must not approximate a socket guard.
-    fn exchange_probe_metadata_guarded(
-        &self,
-        _request: &HttpExchangeRequest,
-        _cancellation: &DavCancellation,
-        _accept: &dyn Fn() -> bool,
-    ) -> Result<RawDavResponse, DavExecutionError> {
-        Err(DavExecutionError::InvalidRequest)
-    }
     fn exchange(
         &self,
         request: &HttpExchangeRequest,
@@ -155,40 +139,7 @@ pub(crate) enum HttpRequestMethod {
     Read(DavMethod),
     ConditionalPut,
     ConditionalCreate,
-    DedicatedProbeCreate,
     ConditionalDelete,
-}
-
-fn probe_metadata_exchange_shape(request: &HttpExchangeRequest) -> bool {
-    request.method() == HttpRequestMethod::Read(DavMethod::Propfind)
-        && request.depth() == Some("0")
-        && request.content_type() == Some(REQUEST_CONTENT_TYPE)
-        && request.body() == super::caldav_transport::probe_harness::METADATA_BODY
-        && request.timeout() == Duration::from_millis(30_000)
-        && request.authorization().is_some()
-        && request.if_match().is_none()
-        && !request.if_none_match
-}
-
-fn probe_acquisition_exchange_shape(request: &HttpExchangeRequest) -> bool {
-    use super::production_mutation::probe_preflight::live_acquisition::{
-        HOME_BODY, PRINCIPAL_BODY,
-    };
-    request.method() == HttpRequestMethod::Read(DavMethod::Propfind)
-        && ((request.depth() == Some("0")
-            && [
-                PRINCIPAL_BODY,
-                HOME_BODY,
-                super::caldav_transport::probe_harness::METADATA_BODY,
-            ]
-            .contains(&request.body()))
-            || (request.depth() == Some("1")
-                && request.body() == super::caldav_transport::probe_harness::METADATA_BODY))
-        && request.content_type() == Some(REQUEST_CONTENT_TYPE)
-        && request.timeout() == Duration::from_millis(30_000)
-        && request.authorization().is_some()
-        && request.if_match().is_none()
-        && !request.if_none_match
 }
 
 pub(crate) struct HttpExchangeRequest {
@@ -348,26 +299,6 @@ impl HttpExchangeRequest {
         })
     }
 
-    fn from_probe_create(
-        request: crate::adapters::mutation_probe::DedicatedProbeCreateRequest,
-        authentication: &DavAuthentication,
-    ) -> Result<Self, DavExecutionError> {
-        let authorization =
-            basic_authorization(authentication).ok_or(DavExecutionError::InvalidRequest)?;
-        let (url, body) = request.into_parts();
-        Ok(Self {
-            method: HttpRequestMethod::DedicatedProbeCreate,
-            url,
-            body,
-            depth: None,
-            content_type: Some(CALENDAR_CONTENT_TYPE),
-            timeout: Duration::from_millis(30_000),
-            authorization: Some(authorization),
-            if_match: None,
-            if_none_match: true,
-        })
-    }
-
     fn from_conditional_delete(
         request: ConditionalEventDeleteRequest,
         authentication: &DavAuthentication,
@@ -472,81 +403,9 @@ pub struct HttpDavExecutor {
 }
 
 // Minted only after the exact reviewed exchange and its return guard succeed.
-pub(crate) struct CompleteProbeMetadataExchange(());
-pub(crate) struct CompleteAcquisitionExchange(());
 
 impl HttpDavExecutor {
-    pub(crate) fn execute_probe_acquisition_guarded(
-        &self,
-        permit: super::production_mutation::probe_preflight::live_acquisition::AcquisitionPermit,
-    ) -> Result<RawDavResponse, DavExecutionError> {
-        if !permit.matches_executor(self) {
-            return Err(DavExecutionError::InvalidRequest);
-        }
-        if self.cancellation.is_cancelled() || !permit.current() {
-            return Err(DavExecutionError::Cancelled);
-        }
-        let (request, auth) = permit.parts();
-        let outgoing = HttpExchangeRequest::from_boundary(request, auth);
-        if !probe_acquisition_exchange_shape(&outgoing) {
-            return Err(DavExecutionError::InvalidRequest);
-        }
-        let raw = self.exchange.exchange_probe_acquisition_guarded(
-            &outgoing,
-            &self.cancellation,
-            &|| permit.current(),
-        )?;
-        if self.cancellation.is_cancelled() || !permit.current() {
-            return Err(DavExecutionError::Cancelled);
-        }
-        if raw.body().len()
-            > if request.depth() == super::caldav_transport::DavDepth::One {
-                64 * 1024
-            } else {
-                16 * 1024
-            }
-        {
-            return Err(DavExecutionError::ResponseTooLarge);
-        }
-        permit
-            .finish(raw, CompleteAcquisitionExchange(()))
-            .map_err(|_| DavExecutionError::InvalidRequest)
-    }
     /// A private consuming exact Probe metadata capability, never generic read.
-    #[allow(dead_code)]
-    pub(crate) fn execute_probe_propfind_guarded(
-        &self,
-        permit: crate::adapters::production_mutation::probe_preflight::ProbeMetadataSendPermit,
-    ) -> Result<
-        crate::adapters::production_mutation::probe_preflight::GuardedProbeMetadata,
-        DavExecutionError,
-    > {
-        if !permit.matches_executor(self) {
-            return Err(DavExecutionError::InvalidRequest);
-        }
-        if self.cancellation.is_cancelled() || !permit.current() {
-            return Err(DavExecutionError::Cancelled);
-        }
-        let (request, authentication) = permit.request_and_authentication();
-        let exchange_request = HttpExchangeRequest::from_boundary(request, authentication);
-        if !probe_metadata_exchange_shape(&exchange_request) {
-            return Err(DavExecutionError::InvalidRequest);
-        }
-        let raw = self.exchange.exchange_probe_metadata_guarded(
-            &exchange_request,
-            &self.cancellation,
-            &|| permit.current(),
-        )?;
-        if self.cancellation.is_cancelled() || !permit.current() {
-            return Err(DavExecutionError::Cancelled);
-        }
-        if raw.body().len() > 16 * 1024 {
-            return Err(DavExecutionError::ResponseTooLarge);
-        }
-        permit
-            .finish(raw, CompleteProbeMetadataExchange(()))
-            .map_err(|_| DavExecutionError::InvalidRequest)
-    }
     #[allow(dead_code)]
     pub(crate) fn execute_creation_guarded(
         &self,
@@ -724,27 +583,6 @@ impl HttpDavExecutor {
         Ok(raw)
     }
 
-    pub(crate) fn execute_probe_create_guarded(
-        &self,
-        request: crate::adapters::mutation_probe::DedicatedProbeCreateRequest,
-        authentication: &DavAuthentication,
-        accept: &dyn Fn() -> bool,
-    ) -> Result<RawDavResponse, DavExecutionError> {
-        if self.cancellation.is_cancelled() {
-            return Err(DavExecutionError::Cancelled);
-        }
-        let exchange_request = HttpExchangeRequest::from_probe_create(request, authentication)?;
-        let raw = self.exchange.exchange_conditional_guarded(
-            exchange_request,
-            &self.cancellation,
-            accept,
-        )?;
-        if raw.body().len() > self.config.max_response_body_bytes {
-            return Err(DavExecutionError::ResponseTooLarge);
-        }
-        Ok(raw)
-    }
-
     pub(crate) fn execute_conditional_delete_guarded(
         &self,
         request: ConditionalEventDeleteRequest,
@@ -782,10 +620,12 @@ impl DavExecutor for HttpDavExecutor {
         if self.cancellation.is_cancelled() {
             return Err(DavExecutionError::Cancelled);
         }
+        let cancellation = self.cancellation.combined(request.request_cancellation());
+        if cancellation.is_cancelled() {
+            return Err(DavExecutionError::Cancelled);
+        }
         let exchange_request = HttpExchangeRequest::from_boundary(request, authentication);
-        let raw = self
-            .exchange
-            .exchange(&exchange_request, &self.cancellation)?;
+        let raw = self.exchange.exchange(&exchange_request, &cancellation)?;
         if raw.body().len() > self.config.max_response_body_bytes {
             return Err(DavExecutionError::ResponseTooLarge);
         }
@@ -864,13 +704,14 @@ impl ReqwestDavExchange {
         &self,
         request: HttpExchangeRequest,
     ) -> Result<reqwest::blocking::Request, DavExecutionError> {
-        if !matches!(
-            request.method(),
+        let allowed = match request.method() {
             HttpRequestMethod::ConditionalPut
-                | HttpRequestMethod::ConditionalCreate
-                | HttpRequestMethod::DedicatedProbeCreate
-                | HttpRequestMethod::ConditionalDelete
-        ) {
+            | HttpRequestMethod::ConditionalCreate
+            | HttpRequestMethod::ConditionalDelete => true,
+
+            _ => false,
+        };
+        if !allowed {
             return Err(DavExecutionError::InvalidRequest);
         }
         self.build_request_inner(&request)
@@ -940,63 +781,6 @@ impl ReqwestDavExchange {
 }
 
 impl DavHttpExchange for ReqwestDavExchange {
-    fn exchange_probe_acquisition_guarded(
-        &self,
-        request: &HttpExchangeRequest,
-        cancellation: &DavCancellation,
-        accept: &dyn Fn() -> bool,
-    ) -> Result<RawDavResponse, DavExecutionError> {
-        if !probe_acquisition_exchange_shape(request) {
-            return Err(DavExecutionError::InvalidRequest);
-        }
-        if cancellation.is_cancelled() {
-            return Err(DavExecutionError::Cancelled);
-        }
-        let outgoing = self.build_request(request)?;
-        if cancellation.is_cancelled() || !accept() {
-            return Err(DavExecutionError::Cancelled);
-        }
-        let limit = if request.depth() == Some("1") {
-            64 * 1024
-        } else {
-            16 * 1024
-        };
-        let raw = self.send_built_request_with_limit(
-            outgoing,
-            cancellation,
-            self.max_response_body_bytes.min(limit),
-        )?;
-        if cancellation.is_cancelled() || !accept() {
-            return Err(DavExecutionError::Cancelled);
-        }
-        Ok(raw)
-    }
-    fn exchange_probe_metadata_guarded(
-        &self,
-        request: &HttpExchangeRequest,
-        cancellation: &DavCancellation,
-        accept: &dyn Fn() -> bool,
-    ) -> Result<RawDavResponse, DavExecutionError> {
-        if !probe_metadata_exchange_shape(request) {
-            return Err(DavExecutionError::InvalidRequest);
-        }
-        if cancellation.is_cancelled() {
-            return Err(DavExecutionError::Cancelled);
-        }
-        let outgoing = self.build_request(request)?;
-        if cancellation.is_cancelled() || !accept() {
-            return Err(DavExecutionError::Cancelled);
-        }
-        let raw = self.send_built_request_with_limit(
-            outgoing,
-            cancellation,
-            self.max_response_body_bytes.min(16 * 1024),
-        )?;
-        if cancellation.is_cancelled() || !accept() {
-            return Err(DavExecutionError::Cancelled);
-        }
-        Ok(raw)
-    }
     fn exchange_exact_get_guarded(
         &self,
         request: &HttpExchangeRequest,
@@ -1086,9 +870,8 @@ fn method(method: HttpRequestMethod) -> Result<Method, DavExecutionError> {
         HttpRequestMethod::Read(DavMethod::Report) => {
             Method::from_bytes(b"REPORT").map_err(|_| DavExecutionError::InvalidRequest)
         }
-        HttpRequestMethod::ConditionalPut
-        | HttpRequestMethod::ConditionalCreate
-        | HttpRequestMethod::DedicatedProbeCreate => Ok(Method::PUT),
+        HttpRequestMethod::ConditionalPut | HttpRequestMethod::ConditionalCreate => Ok(Method::PUT),
+
         HttpRequestMethod::ConditionalDelete => Ok(Method::DELETE),
     }
 }

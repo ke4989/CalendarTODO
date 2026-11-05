@@ -4,15 +4,13 @@ use crate::domain::remote_mutation::{
 };
 use crate::ports::credentials::{CredentialRecord, SecretBytes};
 use crate::ports::remote_mutation::RemoteMutationTransportError;
+use std::collections::BTreeSet;
 use std::{
-    collections::{BTreeSet, VecDeque},
     fmt,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
-    thread,
-    time::Duration,
 };
 use thiserror::Error;
 use url::Url;
@@ -56,6 +54,7 @@ pub enum DavMethod {
 #[derive(Clone, Default)]
 pub struct DavCancellation {
     cancelled: Arc<AtomicBool>,
+    parents: Vec<DavCancellation>,
 }
 
 impl DavCancellation {
@@ -69,7 +68,15 @@ impl DavCancellation {
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::SeqCst)
+        self.cancelled.load(Ordering::SeqCst) || self.parents.iter().any(Self::is_cancelled)
+    }
+    pub(crate) fn combined(&self, other: Option<&Self>) -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            parents: std::iter::once(self.clone())
+                .chain(other.cloned())
+                .collect(),
+        }
     }
 }
 
@@ -92,14 +99,6 @@ impl DavAuthentication {
         Self {
             username: credential.username().to_owned(),
             password: SecretBytes::new(credential.password().expose().to_vec()),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn synthetic(username: &str, password: &[u8]) -> Self {
-        Self {
-            username: username.to_owned(),
-            password: SecretBytes::new(password.to_vec()),
         }
     }
 
@@ -134,6 +133,7 @@ pub struct DavRequest {
     body: Vec<u8>,
     depth: DavDepth,
     timeout_ms: u64,
+    cancellation: Option<DavCancellation>,
 }
 
 impl DavRequest {
@@ -157,9 +157,17 @@ impl DavRequest {
             body,
             depth,
             timeout_ms,
+            cancellation: None,
         })
     }
 
+    pub(crate) fn with_cancellation(mut self, cancellation: DavCancellation) -> Self {
+        self.cancellation = Some(cancellation);
+        self
+    }
+    pub(crate) fn request_cancellation(&self) -> Option<&DavCancellation> {
+        self.cancellation.as_ref()
+    }
     pub fn method(&self) -> DavMethod {
         self.method
     }
@@ -421,6 +429,12 @@ impl DavTransportPolicy {
             {
                 return Err(DavExecutionError::Cancelled);
             }
+            if request
+                .request_cancellation()
+                .is_some_and(DavCancellation::is_cancelled)
+            {
+                return Err(DavExecutionError::Cancelled);
+            }
             self.validate_destination(request.url())?;
             let raw = executor.execute(&request, authentication)?;
             if !(100..=599).contains(&raw.status) {
@@ -452,6 +466,7 @@ impl DavTransportPolicy {
                         .map_err(|_| DavExecutionError::UnsafeRedirect)?
                 };
                 self.validate_destination(&next)?;
+                let request_cancellation = request.cancellation.clone();
                 request = DavRequest::new(
                     request.method(),
                     next,
@@ -459,6 +474,7 @@ impl DavTransportPolicy {
                     request.depth(),
                     request.timeout_ms(),
                 )?;
+                request.cancellation = request_cancellation;
                 continue;
             }
             if raw.content_type.as_ref().is_some_and(|value| {
@@ -496,7 +512,6 @@ impl DavTransportPolicy {
 
     /// Pure exact collection policy check for internally captured Probe evidence.
     /// This constructs no request and grants no executor or routing authority.
-    #[allow(dead_code)]
     pub(crate) fn probe_collection_matches(&self, entry: &Url, route: &str) -> bool {
         self.validate_destination(entry).is_ok()
             && entry
@@ -624,18 +639,6 @@ impl DavTransportPolicy {
             &claim.exact_href,
         )?;
         ConditionalEventDeleteRequest::new(self, target, claim.base_etag.clone(), timeout_ms)
-    }
-
-    pub(crate) fn prepare_conditional_delete(
-        &self,
-        entry_url: &Url,
-        collection_href: &str,
-        exact_href: &str,
-        base_etag: String,
-        timeout_ms: u64,
-    ) -> Result<ConditionalEventDeleteRequest, DavExecutionError> {
-        let target = self.resolve_exact_mutation_target(entry_url, collection_href, exact_href)?;
-        ConditionalEventDeleteRequest::new(self, target, base_etag, timeout_ms)
     }
 
     pub(crate) fn prepare_claimed_deletion_read_back(
@@ -1472,141 +1475,8 @@ pub enum DavExecutionError {
     Dns,
     #[error("DAV TLS negotiation failed")]
     Tls,
-    #[error("DAV scripted execution did not match the expected request")]
-    ScriptMismatch,
     #[error("DAV scripted execution state is unavailable")]
     Unavailable,
 }
 
-pub struct ScriptedRequest {
-    method: DavMethod,
-    url: String,
-    body: Vec<u8>,
-    depth: DavDepth,
-    authentication_required: bool,
-}
-
-impl ScriptedRequest {
-    pub fn new(
-        method: DavMethod,
-        url: impl Into<String>,
-        body: Vec<u8>,
-        depth: DavDepth,
-        authentication_required: bool,
-    ) -> Self {
-        Self {
-            method,
-            url: url.into(),
-            body,
-            depth,
-            authentication_required,
-        }
-    }
-}
-
-impl fmt::Debug for ScriptedRequest {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ScriptedRequest")
-            .field("method", &self.method)
-            .field("destination", &"[REDACTED]")
-            .field("body_bytes", &self.body.len())
-            .field("depth", &self.depth)
-            .field("authentication_required", &self.authentication_required)
-            .finish()
-    }
-}
-
-pub struct ScriptedStep {
-    request: ScriptedRequest,
-    outcome: ScriptedOutcome,
-}
-
-enum ScriptedOutcome {
-    Immediate(Result<RawDavResponse, DavExecutionError>),
-    BlockUntilCancelled,
-}
-
-impl ScriptedStep {
-    pub fn response(request: ScriptedRequest, response: RawDavResponse) -> Self {
-        Self {
-            request,
-            outcome: ScriptedOutcome::Immediate(Ok(response)),
-        }
-    }
-
-    pub fn error(request: ScriptedRequest, error: DavExecutionError) -> Self {
-        Self {
-            request,
-            outcome: ScriptedOutcome::Immediate(Err(error)),
-        }
-    }
-
-    pub fn block_until_cancelled(request: ScriptedRequest) -> Self {
-        Self {
-            request,
-            outcome: ScriptedOutcome::BlockUntilCancelled,
-        }
-    }
-}
-
-pub struct ScriptedDavExecutor {
-    steps: Mutex<VecDeque<ScriptedStep>>,
-    cancellation: DavCancellation,
-}
-
-impl ScriptedDavExecutor {
-    pub fn new(steps: Vec<ScriptedStep>) -> Self {
-        Self {
-            steps: Mutex::new(steps.into()),
-            cancellation: DavCancellation::new(),
-        }
-    }
-
-    pub fn is_finished(&self) -> bool {
-        self.steps.lock().is_ok_and(|steps| steps.is_empty())
-    }
-}
-
-impl DavExecutor for ScriptedDavExecutor {
-    fn execute(
-        &self,
-        request: &DavRequest,
-        authentication: &DavAuthentication,
-    ) -> Result<RawDavResponse, DavExecutionError> {
-        if self.cancellation.is_cancelled() {
-            return Err(DavExecutionError::Cancelled);
-        }
-        let mut steps = self
-            .steps
-            .lock()
-            .map_err(|_| DavExecutionError::Unavailable)?;
-        let step = steps.pop_front().ok_or(DavExecutionError::ScriptMismatch)?;
-        if request.method() != step.request.method
-            || request.url().as_str() != step.request.url
-            || request.body() != step.request.body
-            || request.depth() != step.request.depth
-            || (step.request.authentication_required && !authentication.is_present())
-        {
-            return Err(DavExecutionError::ScriptMismatch);
-        }
-        drop(steps);
-        match step.outcome {
-            ScriptedOutcome::Immediate(outcome) => outcome,
-            ScriptedOutcome::BlockUntilCancelled => loop {
-                if self.cancellation.is_cancelled() {
-                    return Err(DavExecutionError::Cancelled);
-                }
-                thread::sleep(Duration::from_millis(5));
-            },
-        }
-    }
-
-    fn cancellation(&self) -> Option<DavCancellation> {
-        Some(self.cancellation.clone())
-    }
-}
-
 // Offline Probe constraints only; no production owner mint or executor entry.
-#[allow(dead_code)]
-pub(crate) mod probe_harness;

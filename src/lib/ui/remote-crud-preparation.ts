@@ -78,9 +78,13 @@ export function draftRequest(kind: RemoteCrudKind, context: PreparationContext, 
   }
   const titleSelected = kind === "createUtcV2" || draft.selectTitle;
   if (titleSelected && (!draft.title.trim() || [...draft.title].length > 512)) errors.title = remoteText("请输入 1–512 个字符的标题。", "Enter a title between 1 and 512 characters.");
-  if ((kind === "createUtcV2" || draft.descriptionAction === "set") && [...draft.description].length > 10000) errors.description = remoteText("描述最多 10000 个字符。", "The description can contain up to 10,000 characters.");
+  const description = draft.description.replace(/\r\n/g, "\n");
+  if ((kind === "createUtcV2" || draft.descriptionAction === "set") && ([...description].length > 4096 || new TextEncoder().encode(description).length > 12 * 1024)) errors.description = remoteText("描述最多 4096 个字符且不超过 12 KiB。", "The description can contain up to 4,096 characters and 12 KiB.");
   if ((kind === "createUtcV2" || draft.locationAction === "set") && [...draft.location].length > 512) errors.location = remoteText("地点最多 512 个字符。", "The location can contain up to 512 characters.");
   if (kind === "updateEventV3" && draft.descriptionAction === "set" && !draft.description.trim()) errors.description = remoteText("请输入描述；移除内容请明确选择清空。", "Enter a description. To remove it, explicitly select Clear.");
+  // iCloud rewrites a literal backslash immediately before a line break, so
+  // such a note cannot be stored faithfully. Reject locally, never silently.
+  if ((kind === "createUtcV2" || draft.descriptionAction === "set") && description.includes("\\\n")) errors.description = remoteText("行尾不能是反斜线：请删除换行前的反斜线后再保存。", "A line cannot end with a backslash. Remove the backslash before the line break and save again.");
   if (kind === "updateEventV3" && draft.locationAction === "set" && !draft.location.trim()) errors.location = remoteText("请输入地点；移除内容请明确选择清空。", "Enter a location. To remove it, explicitly select Clear.");
   const timeSelected = kind === "createUtcV2" || draft.selectTime;
   const start = parseUtcInput(draft.start), end = parseUtcInput(draft.end);
@@ -93,8 +97,8 @@ export function draftRequest(kind: RemoteCrudKind, context: PreparationContext, 
   if (Object.keys(errors).length) return { errors };
   if (kind === "createUtcV2") return { errors, request: { action: "create", input: { idempotencyKey: key, calendarId: context.calendarId, title: draft.title.trim(), ...(draft.description ? { description: draft.description } : {}), ...(draft.location ? { location: draft.location } : {}), startAtUtcMs: start!, endAtUtcMs: end! } } };
   const text = (action: TextSelection, value: string): RemoteSelectedText | undefined => action === "set" ? { action: "set", value } : action === "clear" ? { action: "clear" } : undefined;
-  const description = text(draft.descriptionAction, draft.description), location = text(draft.locationAction, draft.location);
-  return { errors, request: { action: "update", input: { idempotencyKey: key, resourceId: context.resourceId!, fields: { ...(titleSelected ? { title: draft.title.trim() } : {}), ...(description ? { description } : {}), ...(location ? { location } : {}), ...(timeSelected ? { time: { startAtUtcMs: start!, endAtUtcMs: end! } } : {}) } } } };
+  const descriptionUpdate = text(draft.descriptionAction, description), location = text(draft.locationAction, draft.location);
+  return { errors, request: { action: "update", input: { idempotencyKey: key, resourceId: context.resourceId!, fields: { ...(titleSelected ? { title: draft.title.trim() } : {}), ...(descriptionUpdate ? { description: descriptionUpdate } : {}), ...(location ? { location } : {}), ...(timeSelected ? { time: { startAtUtcMs: start!, endAtUtcMs: end! } } : {}) } } } };
 }
 
 export type PreparationPhase = "draft" | "pending" | "accepted" | "rejected";
@@ -144,6 +148,23 @@ export type BackgroundRemoteWriteResult =
   | { started: false; errors: FieldErrors; message: string }
   | { started: true; stop: () => void; receipt: RemoteCrudReceipt & { calendarId: string; resourceId: string } };
 
+export async function resolveBackgroundConflict(
+  scope: ExactEventScope,
+  choice: "keepRemote" | "retryLocal",
+  confirmedPort: ConfirmedPort,
+): Promise<ExactEventScope | null> {
+  const view = await confirmedPort({ action: "resolveConflict", input: { scope, choice } });
+  if (view.failure || view.receipt.kind !== scope.kind || view.receipt.operationId !== scope.operationId
+    || view.receipt.accountId !== scope.accountId || view.receipt.calendarId !== scope.calendarId
+    || view.receipt.resourceId !== scope.resourceId || !view.operation) throw Error("conflict resolution unavailable");
+  if (choice === "keepRemote") {
+    if (view.operation.state !== "cancelled" || view.operation.resolutionState !== "keepRemote") throw Error("conflict resolution incomplete");
+    return null;
+  }
+  if (view.operation.resolutionState !== "retryLocal" || !view.operation.retryOperationId) throw Error("conflict retry unavailable");
+  return { ...scope, operationId: view.operation.retryOperationId };
+}
+
 export async function retryBackgroundRemoteWrite(
   scope: ExactEventScope,
   confirmedPort: ConfirmedPort,
@@ -184,6 +205,10 @@ export async function retryBackgroundRemoteWrite(
   }
 }
 
+// Window-session retries retain their exact semantic request until admission is
+// acknowledged. No timer/eviction may turn an ambiguous receipt into a new write.
+const unacknowledgedRequests = new Map<string, string>();
+
 /** Starts one confirmed operation whose result lifetime is independent of an editor modal. */
 export async function startBackgroundRemoteWrite(
   kind: RemoteCrudKind,
@@ -199,8 +224,9 @@ export async function startBackgroundRemoteWrite(
     return { started: false, errors: built.errors, message: remoteText("请修正标出的字段后再确认。", "Correct the highlighted fields before confirming.") };
   }
   const baseRequest = built.request;
+  const fingerprint = JSON.stringify({ kind, accountId: context.accountId, calendarId: context.calendarId, request: baseRequest, base: draft.base, metadata: draft.metadata });
   let key: string;
-  try { key = mint(); }
+  try { key = unacknowledgedRequests.get(fingerprint) ?? mint(); unacknowledgedRequests.set(fingerprint, key); }
   catch { return { started: false, errors: {}, message: remoteText("无法生成安全请求，请重试。", "A secure request could not be generated. Try again.") }; }
 
   let stopped = false;
@@ -241,6 +267,7 @@ export async function startBackgroundRemoteWrite(
     const receipt = view.receipt;
     if (!receipt.calendarId || !receipt.resourceId) throw Object.assign(Error("scope mismatch"), { code: "remoteEventIdentityChanged" });
     operationId = receipt.operationId;
+    unacknowledgedRequests.delete(fingerprint);
     accept(view);
     for (const pending of buffered.splice(0)) accept(pending);
     if (!stopped && view.operation?.state === "pending" && !view.failure) {

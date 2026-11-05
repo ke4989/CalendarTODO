@@ -152,31 +152,28 @@ impl ExecutingCalDavAdapter {
             )?;
             require_read_status(inventory.status())?;
             let token = parse_optional_sync_token(inventory.body(), collection.as_str())?;
-            let mut resources = Vec::new();
-            for item in parse_inventory(inventory.body(), collection.as_str())? {
-                let target =
-                    icloud_caldav::resolve(&collection, &item.href).map_err(map_execution_error)?;
-                if !resource_belongs_to_collection(collection.as_str(), &item.href) {
+            let inventory_items = parse_inventory(inventory.body(), collection.as_str())?;
+            let fetched = self.fetch_resources(&collection, &inventory_items, |target| {
+                self.execute(DavMethod::Get, target, Vec::new(), DavDepth::Zero)
+            })?;
+            let mut resources = Vec::with_capacity(fetched.len());
+            for item in fetched {
+                if !item
+                    .content_type
+                    .split(';')
+                    .next()
+                    .is_some_and(|v| v.trim().eq_ignore_ascii_case("text/calendar"))
+                {
                     return Err(ProviderReadError::UnsafeData);
                 }
-                let fetched = self.execute(DavMethod::Get, target, Vec::new(), DavDepth::Zero)?;
-                require_resource_status(fetched.status())?;
-                if !fetched.content_type().is_some_and(|v| {
-                    v.split(';')
-                        .next()
-                        .is_some_and(|v| v.trim().eq_ignore_ascii_case("text/calendar"))
-                }) {
-                    return Err(ProviderReadError::UnsafeData);
-                }
-                let raw = fetched.body().to_vec();
-                let uid = extract_single_uid(&raw)?;
+                let uid = extract_single_uid(&item.body)?;
                 resources.push(StagedResource {
                     href: item.href,
-                    etag: staged_revision(fetched.etag(), &item.etag)?,
-                    content_type: fetched.content_type().unwrap_or_default().to_owned(),
-                    uid: uid.clone(),
-                    parse_status: mutation_parse_status(&raw, &uid),
-                    raw_ics: raw,
+                    etag: item.etag.expect("fetched revision"),
+                    content_type: item.content_type,
+                    parse_status: mutation_parse_status(&item.body, &uid),
+                    uid,
+                    raw_ics: item.body,
                 });
             }
             calendars.push(CalendarInventoryStage {

@@ -1,7 +1,5 @@
 pub mod adapters;
 pub mod application;
-// Compiled only for an explicit `--features dev-test` build. Nothing in the
-// product registers a command, route or menu for it.
 pub mod domain;
 mod ipc;
 pub mod ports;
@@ -616,12 +614,7 @@ pub fn run() {
             let account_registry = Arc::new(AccountSourceRegistry::new(database.clone()));
             let credential_service =
                 CredentialService::new(Arc::new(adapters::credentials::WindowsCredentialStore));
-            let synthetic_attacher = Arc::new(
-                adapters::synthetic_attachment::SyntheticSourceAttacher::new(
-                    account_registry.clone(),
-                ),
-            );
-            let production_attacher = Arc::new(
+                        let production_attacher = Arc::new(
                 adapters::production_attachment::ProductionSourceAttacher::new(
                     account_registry.clone(),
                     credential_service.clone(),
@@ -646,8 +639,7 @@ pub fn run() {
             let account_profiles = AccountProfileService::new(
                 account_registry.clone(),
                 credential_service.clone(),
-                synthetic_attacher,
-                production_attacher,
+                                production_attacher,
             );
             let (sync_deadline_sender, sync_deadline_receiver) = mpsc::channel();
             let sync_scheduler = Arc::new(adapters::sync_timer::SystemSyncDeadlineScheduler::new(
@@ -733,6 +725,16 @@ pub fn run() {
             }, remote_execution).map_err(|_| std::io::Error::other("remote activation owner mismatch"))?;
             app_state.install_confirmed_event_emitter(Arc::new(ipc::ConfirmedEventEmitter(app.handle().clone()))).map_err(|_|std::io::Error::other("scoped event owner mismatch"))?;
             app_state.trigger_remote_recurrence_startup();
+            if app_state.restore_calendar_display_selection().is_err()
+                && let Ok(directory) = app.path().app_log_dir()
+            {
+                let _ = adapters::error_log::append(
+                    &directory,
+                    "calendar_display_selection",
+                    "persistence",
+                    "Stored calendar display selection could not be restored",
+                );
+            }
             app.manage(app_state);
             let desktop_state = ipc::DesktopWindowState::default();
             desktop_state.set_pinned(settings.desktop_pinned);
@@ -816,9 +818,19 @@ pub fn run() {
             ipc::set_desktop_item_order,
             ipc::reset_desktop_item_order,
             ipc::list_calendar_agenda_items,
+            ipc::search_items,
+            ipc::search_remote_start,
+            ipc::search_remote_step,
+            ipc::search_remote_cancel,
+            ipc::search_remote_detail,
+            ipc::search_workspace_page,
+            ipc::search_workspace_detail,
+            ipc::search_workspace_preferences,
             ipc::list_calendar_settings,
             ipc::set_calendar_color_override,
             ipc::set_calendar_visible,
+            ipc::get_calendar_display_selection,
+            ipc::set_calendar_display_selection,
             ipc::set_calendar_display_range,
             ipc::discover_remote_calendars,
             ipc::list_account_profiles,

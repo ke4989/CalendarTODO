@@ -373,6 +373,9 @@ pub(crate) fn restore_desktop_window_state(
 }
 
 pub struct AppState {
+    calendar_display_selection:
+        crate::application::calendar_display_selection::CalendarDisplaySelectionState,
+    remote_search: crate::application::remote_search::RemoteSearch,
     remote_execution:
         Option<Arc<crate::application::remote_execution_activation::RemoteExecutionActivation>>,
     remote_crud: crate::application::remote_crud::RemoteCrudApplication,
@@ -539,8 +542,20 @@ fn confirmed_flow<T, C, R, V>(
     admit(ready)
 }
 impl AppState {
+    pub(crate) fn restore_calendar_display_selection(&self) -> Result<(), ()> {
+        let stored = self
+            .desktop_order_db
+            .calendar_display_hidden()
+            .map_err(|_| ())?;
+        self.calendar_display_selection
+            .restore(stored)
+            .map_err(|_| ())
+    }
+
     pub fn new(parts: AppStateParts) -> Self {
         Self {
+            calendar_display_selection: Default::default(),
+            remote_search: crate::application::remote_search::RemoteSearch::default(),
             remote_execution: None,
             remote_crud: crate::application::remote_crud::RemoteCrudApplication::without_execution(
                 parts.desktop_order_db.clone(),
@@ -797,6 +812,10 @@ impl From<SettingsServiceError> for IpcError {
 impl From<AgendaServiceError> for IpcError {
     fn from(error: AgendaServiceError) -> Self {
         match error {
+            AgendaServiceError::InvalidSearchQuery => Self {
+                code: "searchQuery",
+                message: "搜索关键词过长，请缩短后重试。",
+            },
             AgendaServiceError::Validation(_) => Self {
                 code: "validation",
                 message: "日历本地状态输入无效，请检查显示范围、标签或周期设置。",
@@ -1012,6 +1031,7 @@ pub fn delete_local_calendar(
     if result.is_ok() {
         let _ = state.refresh_reminders();
         let _ = app.emit(LOCAL_TODO_CHANGED_EVENT, ());
+        let _ = app.emit("calendar-todo://settings-changed", ());
     }
     result
 }
@@ -1047,6 +1067,121 @@ pub fn list_calendar_agenda_items(
         .map_err(Into::into)
 }
 
+fn search_error() -> IpcError {
+    IpcError {
+        code: "search",
+        message: "搜索未完成，请查看错误日志",
+    }
+}
+#[tauri::command]
+pub async fn search_remote_start(
+    state: State<'_, AppState>,
+    input: crate::application::remote_search::RangeInput,
+) -> Result<crate::application::remote_search::RangeView, IpcError> {
+    let remote = state.remote_search.clone();
+    let db = state.desktop_order_db.clone();
+    let registry = state.account_profiles.source_registry();
+    tauri::async_runtime::spawn_blocking(move || {
+        remote
+            .start(input, &db, &registry)
+            .map_err(|_| search_error())
+    })
+    .await
+    .map_err(|_| search_error())?
+}
+#[tauri::command]
+pub async fn search_remote_step(
+    state: State<'_, AppState>,
+    task_id: String,
+) -> Result<crate::application::remote_search::RangeView, IpcError> {
+    let remote = state.remote_search.clone();
+    let db = state.desktop_order_db.clone();
+    let registry = state.account_profiles.source_registry();
+    tauri::async_runtime::spawn_blocking(move || {
+        remote
+            .step(&task_id, &db, &registry)
+            .map_err(|_| search_error())
+    })
+    .await
+    .map_err(|_| search_error())?
+}
+#[tauri::command]
+pub fn search_remote_cancel(state: State<'_, AppState>) -> Result<(), IpcError> {
+    state.remote_search.cancel().map_err(|_| search_error())
+}
+#[tauri::command]
+pub fn search_remote_detail(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<crate::domain::search_workspace::SearchSummary, IpcError> {
+    state
+        .remote_search
+        .detail(
+            &session_id,
+            &state.account_profiles.source_registry(),
+            &state.desktop_order_db,
+        )
+        .map_err(|_| search_error())
+}
+#[tauri::command]
+pub async fn search_workspace_page(
+    state: State<'_, AppState>,
+    query: crate::domain::search_workspace::WorkspaceQuery,
+) -> Result<crate::domain::search_workspace::SearchPage, IpcError> {
+    let db = state.desktop_order_db.clone();
+    let remote = state.remote_search.clone();
+    let registry = state.account_profiles.source_registry();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut page = db
+            .search_workspace_page(query.clone())
+            .map_err(|_| search_error())?;
+        remote
+            .merge(&query, &mut page, &registry)
+            .map_err(|_| search_error())?;
+        Ok(page)
+    })
+    .await
+    .map_err(|_| search_error())?
+}
+#[tauri::command]
+pub async fn search_workspace_detail(
+    state: State<'_, AppState>,
+    identity: crate::domain::search_workspace::SearchIdentity,
+) -> Result<crate::domain::search::SearchHit, IpcError> {
+    let db = state.desktop_order_db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.search_workspace_detail(identity).map_err(|_| IpcError {
+            code: "search",
+            message: "日程当前不可用",
+        })
+    })
+    .await
+    .map_err(|_| IpcError {
+        code: "search",
+        message: "日程当前不可用",
+    })?
+}
+#[tauri::command]
+pub fn search_workspace_preferences(
+    state: State<'_, AppState>,
+    update: Option<crate::domain::search_workspace::SearchPreferences>,
+) -> Result<crate::domain::search_workspace::SearchPreferences, IpcError> {
+    state
+        .desktop_order_db
+        .search_preferences(update)
+        .map_err(|_| IpcError {
+            code: "search",
+            message: "搜索设置未保存，请查看错误日志",
+        })
+}
+#[tauri::command]
+pub fn search_items(
+    state: State<'_, AppState>,
+    query: crate::domain::search::SearchQuery,
+) -> Result<crate::domain::search::SearchResults, IpcError> {
+    state.agenda.search_items(query).map_err(Into::into)
+}
+
 #[tauri::command]
 pub fn list_calendar_settings(
     state: State<'_, AppState>,
@@ -1067,6 +1202,50 @@ pub fn set_calendar_color_override(
         .map_err(Into::<IpcError>::into)?;
     let _ = app.emit("calendar-todo://agenda-data-changed", ());
     Ok(())
+}
+
+#[tauri::command]
+pub fn get_calendar_display_selection(
+    state: State<'_, AppState>,
+) -> crate::application::calendar_display_selection::CalendarDisplaySelection {
+    state.calendar_display_selection.get()
+}
+
+#[tauri::command]
+pub fn set_calendar_display_selection(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    hidden_calendar_ids: Vec<String>,
+) -> Result<crate::application::calendar_display_selection::CalendarDisplaySelection, IpcError> {
+    let (snapshot, changed) = state
+        .calendar_display_selection
+        .replace(hidden_calendar_ids, |ids| {
+            state
+                .desktop_order_db
+                .replace_calendar_display_hidden(ids.to_vec())
+                .map_err(|_| ())
+        })
+        .map_err(|error| match error {
+            crate::application::calendar_display_selection::CalendarDisplaySelectionError::Invalid => {
+                IpcError {
+                    code: "validation",
+                    message: "日历显示选择无效，请重试。",
+                }
+            }
+            crate::application::calendar_display_selection::CalendarDisplaySelectionError::Persistence => {
+                IpcError {
+                    code: "persistence",
+                    message: "无法保存日历显示选择，请重试。",
+                }
+            }
+        })?;
+    if changed {
+        let _ = app.emit(
+            crate::application::calendar_display_selection::CALENDAR_DISPLAY_SELECTION_EVENT,
+            &snapshot,
+        );
+    }
+    Ok(snapshot)
 }
 
 #[tauri::command]

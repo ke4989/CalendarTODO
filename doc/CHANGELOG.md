@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.1
+
+- Search local tasks and cached iCloud events from an independent paged view.
+- Read a selected time range from an already bound iCloud calendar. This does not replace ordinary synchronization or its deletion checks.
+- Keep the remote version after a synchronization conflict. A blocked local edit is retried only as a separate successor version.
+- Permanently delete a confirmed local calendar together with its local items.
+- Reject iCloud event text that cannot be transported safely, without dropping the event identity on retry.
+- Continue reading Agenda when older remote-edit records do not match the current submission rules.
+
+The limits in the README still apply. In particular, the app does not create iCloud calendars, edit iCloud reminder times, move events between calendars, or deliver reminders after a full exit.
+
 ## 0.1.0
 
 Calendar TODO for Windows x64:

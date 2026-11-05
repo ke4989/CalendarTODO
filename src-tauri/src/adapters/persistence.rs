@@ -60,8 +60,6 @@ use std::{
 };
 use thiserror::Error;
 use uuid::Uuid;
-#[allow(dead_code)] // Execution-free preview; production first-route source is absent.
-pub(crate) mod probe_first_route;
 #[allow(dead_code)]
 pub(crate) mod probe_ledger;
 mod probe_seed;
@@ -1696,14 +1694,21 @@ pub use db_owner::{
     DirectoryAccessRequestObservation, LockFallbackObservation, OwnerDetail, ParentAccessRequests,
 };
 pub use db_owner::{OwnerError as DatabaseOwnerErrorKind, OwnerStep};
-mod product_read_only;
-pub use product_read_only::ConfigurationAvailability;
-pub(in crate::adapters) use product_read_only::ConfigurationCheck;
-pub(in crate::adapters) use product_read_only::check_configured_probe_profile;
-pub(in crate::adapters) use product_read_only::{
-    ConfiguredProfileSelection, SelectionFailure, select_configured_probe_profile,
-};
-pub use product_read_only::{ProductReadOnlyFailure, read_legacy_diagnostic_profiles};
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationAvailability {
+    Available,
+    OwnerUnavailable,
+    DatabaseMissing,
+    SidecarPresent,
+    SchemaMismatch,
+    NoEligibleProfile,
+    MultipleEligibleProfiles,
+    InvalidProfileBinding,
+    ProfileChanged,
+    OtherUnavailable,
+    Cancelled,
+}
 struct ActorLifetime(Option<std::thread::JoinHandle<()>>);
 impl Drop for ActorLifetime {
     fn drop(&mut self) {
@@ -1794,165 +1799,7 @@ impl Database {
     pub(crate) fn actor_provenance(&self) -> std::sync::Weak<()> {
         Arc::downgrade(&self.owner)
     }
-    pub(crate) fn exact_probe_collections(
-        &self,
-    ) -> Result<probe_target::CommittedExactProbeCollections, PersistenceError> {
-        let actor = self.actor_provenance();
-        self.request(|respond_to| Request::ExactProbeCollections { actor, respond_to })
-    }
-    pub(crate) fn revalidate_exact_probe_collections(
-        &self,
-        snapshot: probe_target::CommittedExactProbeCollections,
-    ) -> Result<probe_target::CommittedExactProbeCollections, PersistenceError> {
-        if !snapshot.matches_actor(&self.actor_provenance()) {
-            return Err(PersistenceError::StaleSyncCapture);
-        }
-        self.request(|respond_to| Request::RevalidateExactProbeCollections {
-            snapshot,
-            respond_to,
-        })
-    }
-    #[allow(dead_code)] // Execution-free candidate; no Probe composition installed.
-    pub(crate) fn probe_target_snapshot(
-        &self,
-        selection: probe_target::ProbeTargetSelection,
-    ) -> Result<probe_target::CommittedProbeTarget, PersistenceError> {
-        let actor = self.actor_provenance();
-        self.request(|respond_to| Request::ProbeTargetSnapshot {
-            selection,
-            actor,
-            respond_to,
-        })
-    }
 
-    #[allow(dead_code)] // Execution-free candidate; no Probe composition installed.
-    pub(crate) fn revalidate_probe_target(
-        &self,
-        snapshot: probe_target::CommittedProbeTarget,
-    ) -> Result<probe_target::CommittedProbeTarget, PersistenceError> {
-        if !snapshot.matches_actor(&self.actor_provenance()) {
-            return Err(PersistenceError::StaleSyncCapture);
-        }
-        self.request(|respond_to| Request::RevalidateProbeTarget {
-            snapshot,
-            respond_to,
-        })
-    }
-    #[allow(dead_code)] // Internal consuming witness import; no product entry.
-    pub(crate) fn import_probe_seed_witness(
-        &self,
-        envelope: crate::adapters::production_mutation::probe_preflight::seed::ProbeSeedEnvelope,
-    ) -> Result<(), PersistenceError> {
-        let (candidate, revision, owner) = envelope
-            .into_parts()
-            .map_err(|_| PersistenceError::StaleSyncCapture)?;
-        if !candidate.matches_actor(&self.actor_provenance()) {
-            return Err(PersistenceError::StaleSyncCapture);
-        }
-        self.request(|respond_to| Request::ImportProbeSeedWitness {
-            candidate,
-            revision,
-            owner,
-            respond_to,
-        })
-    }
-    #[allow(dead_code)]
-    pub(crate) fn preview_probe_first_route(
-        &self,
-        candidate: crate::adapters::production_mutation::probe_preflight::first_route::FirstRouteCandidate,
-    ) -> Result<probe_first_route::FirstRoutePreview, PersistenceError> {
-        let parts = candidate
-            .into_preview()
-            .map_err(|_| PersistenceError::StaleSyncCapture)?;
-        if parts.actor.upgrade().is_none()
-            || !std::sync::Weak::ptr_eq(&parts.actor, &self.actor_provenance())
-        {
-            return Err(PersistenceError::StaleSyncCapture);
-        }
-        self.request(|respond_to| Request::PreviewProbeFirstRoute { parts, respond_to })
-    }
-    pub(crate) fn begin_probe_source(
-        &self,
-        candidate: probe_target::CommittedProbeTarget,
-    ) -> Result<
-        (
-            probe_target::CommittedProbeTarget,
-            probe_ledger::ProbeLedgerToken,
-        ),
-        PersistenceError,
-    > {
-        let actor = self.actor_provenance();
-        if !candidate.matches_actor(&actor) {
-            return Err(PersistenceError::StaleSyncCapture);
-        }
-        self.request(|respond_to| Request::BeginProbeSource {
-            candidate,
-            actor,
-            respond_to,
-        })
-    }
-    pub(crate) fn finish_probe_source(
-        &self,
-        token: &probe_ledger::ProbeLedgerToken,
-        retired: bool,
-    ) -> Result<(), PersistenceError> {
-        if !token.matches_actor(&self.actor_provenance()) {
-            return Err(PersistenceError::StaleSyncCapture);
-        }
-        // Retain the caller's token across failures for exact local shutdown retry.
-        self.request(|respond_to| Request::FinishProbeSource {
-            scope: token.scope.clone(),
-            retired,
-            respond_to,
-        })
-    }
-    pub(crate) fn probe_source_scope(
-        &self,
-        token: &probe_ledger::ProbeLedgerToken,
-    ) -> Result<probe_ledger::ProbeLedgerScope, PersistenceError> {
-        let scope = token.scope.clone();
-        if !self.probe_source_active(&scope)? {
-            return Err(PersistenceError::StaleSyncCapture);
-        }
-        Ok(scope)
-    }
-    pub(crate) fn probe_source_active(
-        &self,
-        scope: &probe_ledger::ProbeLedgerScope,
-    ) -> Result<bool, PersistenceError> {
-        if !scope.matches_actor(&self.actor_provenance()) {
-            return Ok(false);
-        }
-        self.request(|respond_to| Request::ProbeSourceActive {
-            scope: scope.clone(),
-            respond_to,
-        })
-    }
-    pub(crate) fn record_probe_source_closure(
-        &self,
-        proof: crate::application::attachment_runtime::ProbeLocalClosure<'_>,
-    ) -> Result<probe_ledger::ProbeReconciliationEvidence, PersistenceError> {
-        let token = proof.token();
-        if !token.matches_actor(&self.actor_provenance()) {
-            return Err(PersistenceError::StaleSyncCapture);
-        }
-        self.request(|respond_to| Request::RecordProbeSourceClosure {
-            scope: token.scope.clone(),
-            respond_to,
-        })
-    }
-    pub(crate) fn reconcile_probe_source(
-        &self,
-        evidence: probe_ledger::ProbeReconciliationEvidence,
-    ) -> Result<(), PersistenceError> {
-        if !evidence.scope.matches_actor(&self.actor_provenance()) {
-            return Err(PersistenceError::StaleSyncCapture);
-        }
-        self.request(|respond_to| Request::ReconcileProbeSource {
-            evidence,
-            respond_to,
-        })
-    }
     pub(crate) fn creation_reservation_snapshot(
         &self,
         account_id: String,
@@ -1981,6 +1828,58 @@ impl Database {
             respond_to,
         })
     }
+    pub(crate) fn search_read_revision(&self) -> Result<u64, PersistenceError> {
+        self.request(|respond_to| Request::SearchReadRevision { respond_to })
+    }
+    pub(crate) fn search_remote_key(
+        &self,
+        account: String,
+        uid: String,
+        recurrence: String,
+    ) -> Result<Option<Option<String>>, PersistenceError> {
+        self.request(|respond_to| Request::SearchRemoteKey {
+            account,
+            uid,
+            recurrence,
+            respond_to,
+        })
+    }
+    pub fn search_workspace_page(
+        &self,
+        query: crate::domain::search_workspace::WorkspaceQuery,
+    ) -> Result<crate::domain::search_workspace::SearchPage, PersistenceError> {
+        self.request(|respond_to| Request::SearchWorkspacePage { query, respond_to })
+    }
+    pub fn search_workspace_detail(
+        &self,
+        identity: crate::domain::search_workspace::SearchIdentity,
+    ) -> Result<crate::domain::search::SearchHit, PersistenceError> {
+        self.request(|respond_to| Request::SearchWorkspaceDetail {
+            identity,
+            respond_to,
+        })
+    }
+    pub fn search_preferences(
+        &self,
+        update: Option<crate::domain::search_workspace::SearchPreferences>,
+    ) -> Result<crate::domain::search_workspace::SearchPreferences, PersistenceError> {
+        self.request(|respond_to| Request::SearchPreferences { update, respond_to })
+    }
+    pub fn calendar_display_hidden(&self) -> Result<Vec<String>, PersistenceError> {
+        self.request(|respond_to| Request::CalendarDisplayHidden { respond_to })
+    }
+    pub fn replace_calendar_display_hidden(
+        &self,
+        ids: Vec<String>,
+    ) -> Result<(), PersistenceError> {
+        self.request(|respond_to| Request::ReplaceCalendarDisplayHidden { ids, respond_to })
+    }
+    pub fn search_items(
+        &self,
+        query: crate::domain::search::SearchQuery,
+    ) -> Result<crate::domain::search::SearchResults, PersistenceError> {
+        self.request(|respond_to| Request::SearchItems { query, respond_to })
+    }
     pub fn list_local_todos(&self) -> Result<Vec<LocalTodo>, PersistenceError> {
         self.request(|respond_to| Request::List { respond_to })
     }
@@ -2004,11 +1903,11 @@ impl Database {
             respond_to,
         })
     }
-    pub fn delete_local_calendar(
+    pub fn delete_local_calendar_contents(
         &self,
         calendar_id: String,
     ) -> Result<crate::domain::local_todo::DeletedLocalCalendar, PersistenceError> {
-        self.request(|respond_to| Request::DeleteLocalCalendar {
+        self.request(|respond_to| Request::DeleteLocalCalendarContents {
             calendar_id,
             respond_to,
         })
@@ -2337,6 +2236,25 @@ impl Database {
             target,
             actor,
             connected,
+            respond_to,
+        })
+    }
+    pub(crate) fn capture_conflict_scope(
+        &self,
+        kind: crate::domain::remote_crud::RemoteCrudKind,
+        operation_id: String,
+        account_id: String,
+        calendar_id: String,
+        resource_id: String,
+    ) -> Result<scoped_event::ScopedEventSnapshot, PersistenceError> {
+        let actor = self.actor_provenance();
+        self.request(|respond_to| Request::CaptureConflictScope {
+            kind,
+            operation_id,
+            account_id,
+            calendar_id,
+            resource_id,
+            actor,
             respond_to,
         })
     }
@@ -3367,6 +3285,16 @@ impl Database {
         self.request(|respond_to| Request::ReconcileNotificationJobs { now_ms, respond_to })
     }
 
+    pub(crate) fn notification_delivery_current(
+        &self,
+        job: &NotificationJob,
+    ) -> Result<bool, PersistenceError> {
+        self.request(|respond_to| Request::NotificationDeliveryCurrent {
+            job_id: job.job_id.clone(),
+            respond_to,
+        })
+    }
+
     pub fn claim_due_notification_jobs(
         &self,
         now_ms: i64,
@@ -3403,62 +3331,34 @@ impl Database {
 }
 
 enum Request {
-    ProbeSourceActive {
-        scope: probe_ledger::ProbeLedgerScope,
-        respond_to: Sender<Result<bool, PersistenceError>>,
+    SearchReadRevision {
+        respond_to: Sender<Result<u64, PersistenceError>>,
     },
-    RecordProbeSourceClosure {
-        scope: probe_ledger::ProbeLedgerScope,
-        respond_to: Sender<Result<probe_ledger::ProbeReconciliationEvidence, PersistenceError>>,
+    SearchRemoteKey {
+        account: String,
+        uid: String,
+        recurrence: String,
+        respond_to: Sender<Result<Option<Option<String>>, PersistenceError>>,
     },
-    ReconcileProbeSource {
-        evidence: probe_ledger::ProbeReconciliationEvidence,
+    SearchWorkspacePage {
+        query: crate::domain::search_workspace::WorkspaceQuery,
+        respond_to: Sender<Result<crate::domain::search_workspace::SearchPage, PersistenceError>>,
+    },
+    SearchWorkspaceDetail {
+        identity: crate::domain::search_workspace::SearchIdentity,
+        respond_to: Sender<Result<crate::domain::search::SearchHit, PersistenceError>>,
+    },
+    SearchPreferences {
+        update: Option<crate::domain::search_workspace::SearchPreferences>,
+        respond_to:
+            Sender<Result<crate::domain::search_workspace::SearchPreferences, PersistenceError>>,
+    },
+    CalendarDisplayHidden {
+        respond_to: Sender<Result<Vec<String>, PersistenceError>>,
+    },
+    ReplaceCalendarDisplayHidden {
+        ids: Vec<String>,
         respond_to: Sender<Result<(), PersistenceError>>,
-    },
-    BeginProbeSource {
-        candidate: probe_target::CommittedProbeTarget,
-        actor: std::sync::Weak<()>,
-        respond_to: Sender<
-            Result<
-                (
-                    probe_target::CommittedProbeTarget,
-                    probe_ledger::ProbeLedgerToken,
-                ),
-                PersistenceError,
-            >,
-        >,
-    },
-    FinishProbeSource {
-        scope: probe_ledger::ProbeLedgerScope,
-        retired: bool,
-        respond_to: Sender<Result<(), PersistenceError>>,
-    },
-    ProbeTargetSnapshot {
-        selection: probe_target::ProbeTargetSelection,
-        actor: std::sync::Weak<()>,
-        respond_to: Sender<Result<probe_target::CommittedProbeTarget, PersistenceError>>,
-    },
-    ExactProbeCollections {
-        actor: std::sync::Weak<()>,
-        respond_to: Sender<Result<probe_target::CommittedExactProbeCollections, PersistenceError>>,
-    },
-    RevalidateExactProbeCollections {
-        snapshot: probe_target::CommittedExactProbeCollections,
-        respond_to: Sender<Result<probe_target::CommittedExactProbeCollections, PersistenceError>>,
-    },
-    ImportProbeSeedWitness {
-        candidate: probe_target::CommittedProbeTarget,
-        revision: String,
-        owner: crate::adapters::production_mutation::probe_preflight::seed::ProbeSeedOwner,
-        respond_to: Sender<Result<(), PersistenceError>>,
-    },
-    PreviewProbeFirstRoute {
-        parts: crate::adapters::production_mutation::probe_preflight::first_route::FirstRoutePreviewParts,
-        respond_to: Sender<Result<probe_first_route::FirstRoutePreview, PersistenceError>>,
-    },
-    RevalidateProbeTarget {
-        snapshot: probe_target::CommittedProbeTarget,
-        respond_to: Sender<Result<probe_target::CommittedProbeTarget, PersistenceError>>,
     },
     QueueRemoteCrudDelete {
         input: QueueRemoteEventDelete,
@@ -3485,6 +3385,10 @@ enum Request {
     ReconcileNotificationJobs {
         now_ms: i64,
         respond_to: Sender<Result<Option<i64>, PersistenceError>>,
+    },
+    NotificationDeliveryCurrent {
+        job_id: String,
+        respond_to: Sender<Result<bool, PersistenceError>>,
     },
     ClaimDueNotificationJobs {
         now_ms: i64,
@@ -3517,7 +3421,7 @@ enum Request {
         hidden: bool,
         respond_to: Sender<Result<LocalCalendar, PersistenceError>>,
     },
-    DeleteLocalCalendar {
+    DeleteLocalCalendarContents {
         calendar_id: String,
         respond_to:
             Sender<Result<crate::domain::local_todo::DeletedLocalCalendar, PersistenceError>>,
@@ -3578,8 +3482,16 @@ enum Request {
         todo_id: String,
         respond_to: Sender<Result<(), PersistenceError>>,
     },
-    SoftDeleteOccurrence { todo_id: String, occurrence_key: String, respond_to: Sender<Result<(), PersistenceError>> },
-    RestoreRecentlyDeletedOccurrence { todo_id: String, occurrence_key: String, respond_to: Sender<Result<LocalTodo, PersistenceError>> },
+    SoftDeleteOccurrence {
+        todo_id: String,
+        occurrence_key: String,
+        respond_to: Sender<Result<(), PersistenceError>>,
+    },
+    RestoreRecentlyDeletedOccurrence {
+        todo_id: String,
+        occurrence_key: String,
+        respond_to: Sender<Result<LocalTodo, PersistenceError>>,
+    },
     RestoreRecentlyDeleted {
         todo_id: String,
         respond_to: Sender<Result<LocalTodo, PersistenceError>>,
@@ -3686,18 +3598,86 @@ enum Request {
         connected: scoped_event::ConnectedOwnerCheck,
         respond_to: Sender<Result<scoped_event::ScopedEventSnapshot, PersistenceError>>,
     },
-    SelectConfirmedTarget { input: scoped_event::ConfirmedTargetInput, actor: std::sync::Weak<()>, respond_to: Sender<Result<scoped_event::ConfirmedTarget, PersistenceError>> },
-    AdmitConfirmedTarget { input: scoped_event::ConfirmedTargetInput, target: scoped_event::ConfirmedTarget, actor: std::sync::Weak<()>, connected: scoped_event::ConnectedOwnerCheck, respond_to: Sender<Result<scoped_event::ScopedEventSnapshot, PersistenceError>> },
-    RehydrateScopedEvent { kind:crate::domain::remote_crud::RemoteCrudKind,operation_id:String,account_id:String,calendar_id:String,resource_id:String,actor:std::sync::Weak<()>,connected:Option<scoped_event::ConnectedOwnerCheck>,respond_to:Sender<Result<scoped_event::ScopedEventSnapshot,PersistenceError>> },
-    AdmitScopedCrud { input:scoped_event::ScopedCrudInput,actor:std::sync::Weak<()>,connected:Option<scoped_event::ConnectedOwnerCheck>,respond_to:Sender<Result<scoped_event::ScopedEventSnapshot,PersistenceError>> },
-    ClaimScopedCreate {scope:scoped_event::ScopedEventSnapshot,request:crate::application::remote_mutation_runtime::MutationRequestGate,respond_to:Sender<Result<Option<RemoteCreationClaim>,PersistenceError>>},
-    ClaimScopedDelete {scope:scoped_event::ScopedEventSnapshot,request:crate::application::remote_mutation_runtime::MutationRequestGate,respond_to:Sender<Result<Option<RemoteDeletionClaim>,PersistenceError>>},
-    AdmitScopedEvent { input: QueueRemoteEventUpdateV3, confirmation: scoped_event::EventConfirmation, actor: std::sync::Weak<()>, connected:Option<scoped_event::ConnectedOwnerCheck>, respond_to: Sender<Result<scoped_event::ScopedEventSnapshot, PersistenceError>> },
-    ClaimScopedEvent { scope: scoped_event::ScopedEventSnapshot, request:Option<crate::application::remote_mutation_runtime::MutationRequestGate>, respond_to: Sender<Result<Option<RemoteEventMutationClaimV3>, PersistenceError>> },
-    ScopedEventSendSnapshot { scope: scoped_event::ScopedEventSnapshot, claim: RemoteEventMutationClaimV3, respond_to: Sender<Result<RemoteEventUpdateSnapshotV3, PersistenceError>> },
-    ScopedEventReadAllowed { scope: scoped_event::ScopedEventSnapshot, claim: RemoteEventMutationClaimV3, respond_to: Sender<Result<bool, PersistenceError>> },
-    ScopedEventStatus { scope: scoped_event::ScopedEventSnapshot, respond_to: Sender<Result<crate::domain::remote_crud::RemoteCrudOperation, PersistenceError>> },
-    ResolveScopedEvent { scope: scoped_event::ScopedEventSnapshot, choice: ConflictResolutionChoice, connected:Option<scoped_event::ConnectedOwnerCheck>, respond_to: Sender<Result<ConflictResolutionResult, PersistenceError>> },
+    SelectConfirmedTarget {
+        input: scoped_event::ConfirmedTargetInput,
+        actor: std::sync::Weak<()>,
+        respond_to: Sender<Result<scoped_event::ConfirmedTarget, PersistenceError>>,
+    },
+    AdmitConfirmedTarget {
+        input: scoped_event::ConfirmedTargetInput,
+        target: scoped_event::ConfirmedTarget,
+        actor: std::sync::Weak<()>,
+        connected: scoped_event::ConnectedOwnerCheck,
+        respond_to: Sender<Result<scoped_event::ScopedEventSnapshot, PersistenceError>>,
+    },
+    RehydrateScopedEvent {
+        kind: crate::domain::remote_crud::RemoteCrudKind,
+        operation_id: String,
+        account_id: String,
+        calendar_id: String,
+        resource_id: String,
+        actor: std::sync::Weak<()>,
+        connected: Option<scoped_event::ConnectedOwnerCheck>,
+        respond_to: Sender<Result<scoped_event::ScopedEventSnapshot, PersistenceError>>,
+    },
+    CaptureConflictScope {
+        kind: crate::domain::remote_crud::RemoteCrudKind,
+        operation_id: String,
+        account_id: String,
+        calendar_id: String,
+        resource_id: String,
+        actor: std::sync::Weak<()>,
+        respond_to: Sender<Result<scoped_event::ScopedEventSnapshot, PersistenceError>>,
+    },
+    AdmitScopedCrud {
+        input: scoped_event::ScopedCrudInput,
+        actor: std::sync::Weak<()>,
+        connected: Option<scoped_event::ConnectedOwnerCheck>,
+        respond_to: Sender<Result<scoped_event::ScopedEventSnapshot, PersistenceError>>,
+    },
+    ClaimScopedCreate {
+        scope: scoped_event::ScopedEventSnapshot,
+        request: crate::application::remote_mutation_runtime::MutationRequestGate,
+        respond_to: Sender<Result<Option<RemoteCreationClaim>, PersistenceError>>,
+    },
+    ClaimScopedDelete {
+        scope: scoped_event::ScopedEventSnapshot,
+        request: crate::application::remote_mutation_runtime::MutationRequestGate,
+        respond_to: Sender<Result<Option<RemoteDeletionClaim>, PersistenceError>>,
+    },
+    AdmitScopedEvent {
+        input: QueueRemoteEventUpdateV3,
+        confirmation: scoped_event::EventConfirmation,
+        actor: std::sync::Weak<()>,
+        connected: Option<scoped_event::ConnectedOwnerCheck>,
+        respond_to: Sender<Result<scoped_event::ScopedEventSnapshot, PersistenceError>>,
+    },
+    ClaimScopedEvent {
+        scope: scoped_event::ScopedEventSnapshot,
+        request: Option<crate::application::remote_mutation_runtime::MutationRequestGate>,
+        respond_to: Sender<Result<Option<RemoteEventMutationClaimV3>, PersistenceError>>,
+    },
+    ScopedEventSendSnapshot {
+        scope: scoped_event::ScopedEventSnapshot,
+        claim: RemoteEventMutationClaimV3,
+        respond_to: Sender<Result<RemoteEventUpdateSnapshotV3, PersistenceError>>,
+    },
+    ScopedEventReadAllowed {
+        scope: scoped_event::ScopedEventSnapshot,
+        claim: RemoteEventMutationClaimV3,
+        respond_to: Sender<Result<bool, PersistenceError>>,
+    },
+    ScopedEventStatus {
+        scope: scoped_event::ScopedEventSnapshot,
+        respond_to:
+            Sender<Result<crate::domain::remote_crud::RemoteCrudOperation, PersistenceError>>,
+    },
+    ResolveScopedEvent {
+        scope: scoped_event::ScopedEventSnapshot,
+        choice: ConflictResolutionChoice,
+        connected: Option<scoped_event::ConnectedOwnerCheck>,
+        respond_to: Sender<Result<ConflictResolutionResult, PersistenceError>>,
+    },
 
     ClaimRemoteEvent {
         account_id: String,
@@ -3762,8 +3742,10 @@ enum Request {
         respond_to: Sender<Result<CommittedEventScheduleChange, PersistenceError>>,
     },
     RestoreScopedEvent {
-        claim:RemoteEventMutationClaimV3,remote:RemoteReadBack,request:crate::application::remote_mutation_runtime::MutationRequestGate,
-        respond_to:Sender<Result<RemoteEventMutationClaimV3,PersistenceError>>,
+        claim: RemoteEventMutationClaimV3,
+        remote: RemoteReadBack,
+        request: crate::application::remote_mutation_runtime::MutationRequestGate,
+        respond_to: Sender<Result<RemoteEventMutationClaimV3, PersistenceError>>,
     },
     FinishRemoteFields {
         claim: RemoteFieldsMutationClaim,
@@ -3929,6 +3911,10 @@ enum Request {
         now_ms: i64,
         respond_to: Sender<Result<ConflictResolutionResult, PersistenceError>>,
     },
+    SearchItems {
+        query: crate::domain::search::SearchQuery,
+        respond_to: Sender<Result<crate::domain::search::SearchResults, PersistenceError>>,
+    },
     ListCalendarAgendaItems {
         respond_to: Sender<Result<Vec<CalendarAgendaItem>, PersistenceError>>,
     },
@@ -3959,11 +3945,20 @@ enum Request {
     },
     ICloudBindingLease {
         account_id: String,
-        respond_to: Sender<Result<Option<(crate::adapters::icloud_caldav::ICloudBinding, Arc<std::sync::atomic::AtomicBool>)>, PersistenceError>>,
+        respond_to: Sender<
+            Result<
+                Option<(
+                    crate::adapters::icloud_caldav::ICloudBinding,
+                    Arc<std::sync::atomic::AtomicBool>,
+                )>,
+                PersistenceError,
+            >,
+        >,
     },
     ICloudBinding {
         account_id: String,
-        respond_to: Sender<Result<Option<crate::adapters::icloud_caldav::ICloudBinding>, PersistenceError>>,
+        respond_to:
+            Sender<Result<Option<crate::adapters::icloud_caldav::ICloudBinding>, PersistenceError>>,
     },
     ReplaceDiscoveredCalendars {
         account_id: String,
@@ -4073,87 +4068,6 @@ fn run_actor(
         HashMap::new();
     for request in receiver {
         match request {
-            Request::ProbeSourceActive { scope, respond_to } => {
-                let _ = respond_to.send(probe_ledger::active(&connection, &scope));
-            }
-            Request::RecordProbeSourceClosure { scope, respond_to } => {
-                let _ = respond_to.send(probe_ledger::record_closure(&connection, scope));
-            }
-            Request::ReconcileProbeSource {
-                evidence,
-                respond_to,
-            } => {
-                let _ = respond_to.send(probe_ledger::reconcile(&connection, evidence));
-            }
-            Request::BeginProbeSource {
-                candidate,
-                actor,
-                respond_to,
-            } => {
-                let _ = respond_to.send(probe_ledger::begin(
-                    &mut connection,
-                    &sync_epochs,
-                    candidate,
-                    actor,
-                ));
-            }
-            Request::FinishProbeSource {
-                scope,
-                retired,
-                respond_to,
-            } => {
-                let _ = respond_to.send(probe_ledger::finish(&connection, &scope, retired));
-            }
-            Request::ProbeTargetSnapshot {
-                selection,
-                actor,
-                respond_to,
-            } => {
-                let result = probe_target::capture(&connection, &mut sync_epochs, selection, actor);
-                let _ = respond_to.send(result);
-            }
-
-            Request::ExactProbeCollections { actor, respond_to } => {
-                let _ = respond_to.send(probe_target::capture_exact_pair(
-                    &connection,
-                    &mut sync_epochs,
-                    actor,
-                ));
-            }
-            Request::RevalidateExactProbeCollections {
-                snapshot,
-                respond_to,
-            } => {
-                let _ = respond_to.send(probe_target::revalidate_exact_pair(
-                    &connection,
-                    &sync_epochs,
-                    snapshot,
-                ));
-            }
-            Request::ImportProbeSeedWitness {
-                candidate,
-                revision,
-                owner,
-                respond_to,
-            } => {
-                let _ = respond_to.send(probe_seed::import(
-                    &connection,
-                    &sync_epochs,
-                    candidate,
-                    revision,
-                    owner,
-                ));
-            }
-            Request::PreviewProbeFirstRoute { parts, respond_to } => {
-                let _ = respond_to.send(probe_first_route::preview(&connection, parts));
-            }
-            Request::RevalidateProbeTarget {
-                snapshot,
-                respond_to,
-            } => {
-                let result = probe_target::revalidate(&connection, &sync_epochs, snapshot);
-                let _ = respond_to.send(result);
-            }
             Request::RemoteCrudStatus {
                 account,
                 kind,
@@ -4205,6 +4119,10 @@ fn run_actor(
             Request::ReconcileNotificationJobs { now_ms, respond_to } => {
                 let _ = respond_to.send(reconcile_notification_jobs(&mut connection, now_ms));
             }
+            Request::NotificationDeliveryCurrent { job_id, respond_to } => {
+                let result = connection.query_row("SELECT EXISTS(SELECT 1 FROM notification_jobs j WHERE j.job_id=?1 AND j.state='claimed' AND (j.source_kind<>'local_todo' OR EXISTS(SELECT 1 FROM local_todos t JOIN local_calendars c ON c.calendar_id=t.local_calendar_id LEFT JOIN work_item_state w ON w.local_todo_id=t.todo_id AND w.local_occurrence_key=j.occurrence_key WHERE t.todo_id=j.source_id AND t.active=1 AND c.hidden=0 AND COALESCE(w.completed,0)=0)) AND (SELECT reminder_notifications_enabled FROM app_settings WHERE singleton_id=1)=1)",[job_id],|r|r.get(0)).map_err(Into::into);
+                let _ = respond_to.send(result);
+            }
             Request::ClaimDueNotificationJobs { now_ms, respond_to } => {
                 let _ = respond_to.send(claim_due_notification_jobs(&mut connection, now_ms));
             }
@@ -4232,6 +4150,62 @@ fn run_actor(
             Request::List { respond_to } => {
                 let _ = respond_to.send(list(&connection));
             }
+            Request::SearchReadRevision { respond_to } => {
+                let _ = respond_to.send(Ok(connection.total_changes()));
+            }
+            Request::SearchRemoteKey {
+                account,
+                uid,
+                recurrence,
+                respond_to,
+            } => {
+                let _ = respond_to.send(search_workspace::remote_key(
+                    &connection,
+                    &account,
+                    &uid,
+                    &recurrence,
+                ));
+            }
+            Request::SearchWorkspacePage { query, respond_to } => {
+                let _ = respond_to.send(search_workspace::page(&connection, query));
+            }
+            Request::SearchWorkspaceDetail {
+                identity,
+                respond_to,
+            } => {
+                let _ = respond_to.send(search_workspace::detail(&connection, identity));
+            }
+            Request::SearchPreferences { update, respond_to } => {
+                let _ = respond_to.send(search_workspace::preferences(&connection, update));
+            }
+            Request::CalendarDisplayHidden { respond_to } => {
+                let _ = respond_to.send(calendar_display_selection::hidden(&connection));
+            }
+            Request::ReplaceCalendarDisplayHidden { ids, respond_to } => {
+                let _ = respond_to.send(calendar_display_selection::replace_hidden(
+                    &mut connection,
+                    &ids,
+                ));
+            }
+            Request::SearchItems { query, respond_to } => {
+                let result = (|| {
+                    use crate::domain::search::{self, SearchHit, SearchResults};
+                    let terms =
+                        search::terms(&query).map_err(|_| PersistenceError::UnsafeSyncStage)?;
+                    if terms.is_empty() {
+                        return Ok(SearchResults {
+                            hits: Vec::new(),
+                            truncated: false,
+                        });
+                    }
+                    let local = list(&connection)?.into_iter().map(SearchHit::Todo);
+                    let remote = list_calendar_agenda_items(&connection, None)?
+                        .into_iter()
+                        .map(SearchHit::Calendar);
+                    Ok(search::select(&query, &terms, local.chain(remote)))
+                })();
+                let _ = respond_to.send(result);
+            }
             Request::ListLocalCalendars { respond_to } => {
                 let _ = respond_to.send(list_local_calendars(&connection));
             }
@@ -4249,12 +4223,16 @@ fn run_actor(
                     hidden,
                 ));
             }
-            Request::DeleteLocalCalendar {
+            Request::DeleteLocalCalendarContents {
                 calendar_id,
                 respond_to,
             } => {
-                let _ = respond_to.send(delete_local_calendar(&mut connection, &calendar_id));
+                let _ = respond_to.send(delete_local_calendar_contents(
+                    &mut connection,
+                    &calendar_id,
+                ));
             }
+
             Request::MoveLocalTodo {
                 todo_id,
                 calendar_id,
@@ -4805,6 +4783,21 @@ fn run_actor(
                     })
                 };
                 let _ = respond_to.send(result);
+            }
+            Request::CaptureConflictScope {
+                kind,
+                operation_id,
+                account_id,
+                calendar_id,
+                resource_id,
+                actor,
+                respond_to,
+            } => {
+                let _ = respond_to.send(scoped_event::capture_conflict(
+                    &connection,
+                    (kind, &operation_id, &account_id, &calendar_id, &resource_id),
+                    actor,
+                ));
             }
             Request::ScopedEventStatus { scope, respond_to } => {
                 let _ = respond_to.send(scoped_event::status(&connection, &scope));
@@ -5844,11 +5837,14 @@ fn run_actor(
     drop(owner_guard);
 }
 
+#[path = "persistence/calendar_display_selection.rs"]
+mod calendar_display_selection;
 /// Latest schema version produced by [`migrations`]. Gates that require the
 /// exact product schema compare against this instead of a literal.
-pub(crate) const SCHEMA_VERSION: i64 = 60;
 #[path = "persistence/icloud_binding.rs"]
 mod icloud_binding;
+#[path = "persistence/search_workspace.rs"]
+mod search_workspace;
 
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -5912,6 +5908,8 @@ fn migrations() -> Migrations<'static> {
         M::up(MIGRATION_058),
         M::up(remote_update_successor::MIGRATION),
         M::up(icloud_binding::MIGRATION),
+        M::up(search_workspace::MIGRATION),
+        M::up(calendar_display_selection::MIGRATION),
     ])
 }
 
@@ -6206,65 +6204,54 @@ fn set_local_calendar_hidden(
     Ok(updated)
 }
 
-/// Deletes one local calendar without ever deleting a task.
-///
-/// Every task owned by the calendar — including soft-deleted history kept for
-/// undo and records — is reassigned to a remaining visible calendar before the
-/// row is removed. When the deleted calendar was the default, the receiving
-/// calendar becomes the new default so later task creation keeps working. The
-/// last calendar, and any deletion that would leave no visible calendar, fail
-/// closed instead of stranding user data.
-fn delete_local_calendar(
+fn delete_local_calendar_contents(
     connection: &mut Connection,
     calendar_id: &str,
 ) -> Result<crate::domain::local_todo::DeletedLocalCalendar, PersistenceError> {
     let now = unix_time_ms()?;
-    let transaction = connection.transaction()?;
-    let calendar = local_calendar(&transaction, calendar_id)?;
-    let target = transaction
-        .query_row(
-            "SELECT calendar_id FROM local_calendars
-             WHERE account_id=?1 AND calendar_id<>?2 AND hidden=0
-             ORDER BY is_default DESC, created_at_ms, calendar_id
-             LIMIT 1",
-            params![DEFAULT_LOCAL_ACCOUNT_ID, calendar_id],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-    let Some(target) = target else {
-        // Either this was the only calendar, or every other calendar is hidden.
-        let remaining = transaction.query_row(
-            "SELECT COUNT(*) FROM local_calendars WHERE account_id=?1 AND calendar_id<>?2",
-            params![DEFAULT_LOCAL_ACCOUNT_ID, calendar_id],
-            |row| row.get::<_, i64>(0),
-        )?;
-        return Err(PersistenceError::Domain(if remaining == 0 {
-            crate::domain::local_todo::LocalTodoError::LastCalendar
-        } else {
-            crate::domain::local_todo::LocalTodoError::LastVisibleCalendar
-        }));
+    let tx = connection.transaction()?;
+    let calendar = local_calendar(&tx, calendar_id)?;
+    let fallback: Option<String> = tx.query_row("SELECT calendar_id FROM local_calendars WHERE account_id=?1 AND calendar_id<>?2 AND hidden=0 ORDER BY is_default DESC,created_at_ms,calendar_id LIMIT 1", params![DEFAULT_LOCAL_ACCOUNT_ID,calendar_id], |r|r.get(0)).optional()?;
+    let fallback = match fallback {
+        Some(id) => id,
+        None => {
+            let remaining: i64 = tx.query_row(
+                "SELECT count(*) FROM local_calendars WHERE account_id=?1 AND calendar_id<>?2",
+                params![DEFAULT_LOCAL_ACCOUNT_ID, calendar_id],
+                |r| r.get(0),
+            )?;
+            return Err(PersistenceError::Domain(if remaining == 0 {
+                crate::domain::local_todo::LocalTodoError::LastCalendar
+            } else {
+                crate::domain::local_todo::LocalTodoError::LastVisibleCalendar
+            }));
+        }
     };
     if calendar.is_default {
-        transaction.execute(
-            "UPDATE local_calendars SET is_default=0 WHERE account_id=?1",
-            [DEFAULT_LOCAL_ACCOUNT_ID],
+        tx.execute(
+            "UPDATE local_calendars SET is_default=0 WHERE calendar_id=?1",
+            [calendar_id],
         )?;
-        transaction.execute(
+        tx.execute(
             "UPDATE local_calendars SET is_default=1,updated_at_ms=?2 WHERE calendar_id=?1",
-            params![target, now],
+            params![fallback, now],
         )?;
     }
-    let moved = transaction.execute(
-        "UPDATE local_todos SET local_calendar_id=?2,updated_at_ms=CASE WHEN active=1 THEN ?3 ELSE updated_at_ms END WHERE local_calendar_id=?1",
-        params![calendar_id, target, now],
-    )?;
-    transaction.execute(
-        "DELETE FROM local_calendars WHERE calendar_id=?1",
+    tx.execute("UPDATE app_settings SET default_calendar_id=?2,updated_at_ms=?3 WHERE default_calendar_id=?1",params![calendar_id,fallback,now])?;
+    tx.execute("DELETE FROM desktop_item_order WHERE EXISTS(SELECT 1 FROM local_todos t WHERE t.local_calendar_id=?1 AND substr(item_key,1,length(t.todo_id)+6)='todo:'||t.todo_id||':')",[calendar_id])?;
+    tx.execute("DELETE FROM notification_jobs WHERE source_kind='local_todo' AND source_id IN(SELECT todo_id FROM local_todos WHERE local_calendar_id=?1)",[calendar_id])?;
+    tx.execute("DELETE FROM work_item_state WHERE local_todo_id IN(SELECT todo_id FROM local_todos WHERE local_calendar_id=?1)",[calendar_id])?;
+    let deleted = tx.execute(
+        "DELETE FROM local_todos WHERE local_calendar_id=?1",
         [calendar_id],
     )?;
-    transaction.commit()?;
+    tx.execute(
+        "DELETE FROM local_calendars WHERE calendar_id=?1 AND account_id=?2",
+        params![calendar_id, DEFAULT_LOCAL_ACCOUNT_ID],
+    )?;
+    tx.commit()?;
     Ok(crate::domain::local_todo::DeletedLocalCalendar {
-        moved_todos: u32::try_from(moved).unwrap_or(u32::MAX),
+        deleted_todos: u32::try_from(deleted).unwrap_or(u32::MAX),
     })
 }
 
@@ -7202,11 +7189,22 @@ fn update_app_settings(
             [now],
         )?;
     }
+    // A settings save captured before calendar deletion must not restore its ID.
+    let default_calendar_id = if let Some(id) = input.default_calendar_id.as_ref() {
+        let exists: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM local_calendars WHERE calendar_id=?1 UNION ALL SELECT 1 FROM calendars WHERE calendar_id=?1)",[id],|r|r.get(0))?;
+        if exists {
+            Some(id.clone())
+        } else {
+            transaction.query_row("SELECT calendar_id FROM local_calendars WHERE account_id=?1 AND hidden=0 ORDER BY is_default DESC,created_at_ms,calendar_id LIMIT 1",[DEFAULT_LOCAL_ACCOUNT_ID],|r|r.get(0)).optional()?
+        }
+    } else {
+        None
+    };
     // The desktop list's own position lock and folded choice are intentionally
     // absent here: the Settings form must never overwrite them.
     let changed = transaction.execute(
         "UPDATE app_settings SET window_mode=?1,sync_interval_minutes=?2,sync_on_startup=?3,desktop_list_mode=?4,desktop_opacity_percent=?5,desktop_show_calendar_name=?6,desktop_show_time=?7,desktop_show_tags=?8,main_show_calendar_name=?9,main_show_time=?10,main_show_tags=?11,start_hidden_in_tray=?12,launch_at_login=?13,local_todo_color=?14,default_calendar_id=?15,updated_at_ms=?16,language=?17,local_display_past_days=?18,local_display_future_days=?19,theme_palette=?20,color_mode=?21,reminder_notifications_enabled=?22 WHERE singleton_id=1",
-        params![input.window_mode.as_str(), input.sync_interval_minutes, input.sync_on_startup, input.desktop_list_mode, input.desktop_opacity_percent, input.desktop_show_calendar_name, input.desktop_show_time, input.desktop_show_tags, input.main_show_calendar_name, input.main_show_time, input.main_show_tags, input.start_hidden_in_tray, input.launch_at_login, input.local_todo_color, input.default_calendar_id, now, input.language.as_str(), input.local_display_past_days, input.local_display_future_days, input.theme_palette.as_str(), input.color_mode.as_str(), input.reminder_notifications_enabled],
+        params![input.window_mode.as_str(), input.sync_interval_minutes, input.sync_on_startup, input.desktop_list_mode, input.desktop_opacity_percent, input.desktop_show_calendar_name, input.desktop_show_time, input.desktop_show_tags, input.main_show_calendar_name, input.main_show_time, input.main_show_tags, input.start_hidden_in_tray, input.launch_at_login, input.local_todo_color, default_calendar_id, now, input.language.as_str(), input.local_display_past_days, input.local_display_future_days, input.theme_palette.as_str(), input.color_mode.as_str(), input.reminder_notifications_enabled],
     )?;
     if changed != 1 {
         return Err(PersistenceError::NotFound);
@@ -10380,6 +10378,7 @@ fn list_cached_calendar_resources(
 fn overlay_pending_remote_updates(
     connection: &Connection,
     items: &mut [CalendarAgendaItem],
+    resource: Option<&str>,
 ) -> Result<(), PersistenceError> {
     use crate::domain::remote_mutation::RemoteOptionalTextUpdateV2;
     let mut statement = connection.prepare(
@@ -10388,11 +10387,11 @@ fn overlay_pending_remote_updates(
          JOIN calendars c ON c.calendar_id=o.calendar_id
          JOIN accounts a ON a.account_id=o.account_id
          WHERE o.operation_kind='update_event' AND o.state IN ('pending','conflict')
-           AND c.selected=1 AND a.removed_at_ms IS NULL
+           AND c.selected=1 AND a.removed_at_ms IS NULL AND (?1 IS NULL OR o.resource_id=?1)
          ORDER BY o.created_at_ms,o.operation_id",
     )?;
     let mut rows = statement
-        .query_map([], |row| {
+        .query_map([resource], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -10404,10 +10403,10 @@ fn overlay_pending_remote_updates(
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    let mut successors=connection.prepare("SELECT u.operation_id,u.account_id,u.resource_id,u.intent_json,CASE WHEN u.state='blocked_conflict' THEN 'conflict' ELSE 'pending' END,'ready',NULL FROM remote_update_successors u JOIN calendars c ON c.calendar_id=u.calendar_id JOIN accounts a ON a.account_id=u.account_id WHERE c.selected=1 AND a.removed_at_ms IS NULL AND u.state<>'cancelled' ORDER BY u.updated_at_ms,u.operation_id")?;
+    let mut successors=connection.prepare("SELECT CASE WHEN u.state='blocked_conflict' THEN u.predecessor_operation_id ELSE u.operation_id END,u.account_id,u.resource_id,u.intent_json,CASE WHEN u.state='blocked_conflict' THEN 'conflict' ELSE 'pending' END,'ready',NULL FROM remote_update_successors u JOIN calendars c ON c.calendar_id=u.calendar_id JOIN accounts a ON a.account_id=u.account_id WHERE c.selected=1 AND a.removed_at_ms IS NULL AND u.state<>'cancelled' AND (?1 IS NULL OR u.resource_id=?1) ORDER BY u.updated_at_ms,u.operation_id")?;
     rows.extend(
         successors
-            .query_map([], |r| {
+            .query_map([resource], |r| {
                 Ok((
                     r.get(0)?,
                     r.get(1)?,
@@ -10421,37 +10420,62 @@ fn overlay_pending_remote_updates(
             .collect::<Result<Vec<_>, _>>()?,
     );
     for (operation_id, account_id, resource_id, intent, state, phase, outcome) in rows {
-        let fields = crate::domain::remote_event_update::decode_event_intent_v3(intent.as_bytes())?;
+        let fields =
+            crate::domain::remote_event_update::decode_stored_event_intent_v3(intent.as_bytes());
+        let writable = fields
+            .as_ref()
+            .is_ok_and(|fields| fields.clone().validate().is_ok());
         for item in items
             .iter_mut()
             .filter(|item| item.resource_id == resource_id)
         {
-            if let Some(title) = &fields.title {
-                item.title = title.clone();
-            }
-            if let Some(description) = &fields.description {
-                item.notes = match description {
-                    RemoteOptionalTextUpdateV2::Set(value) => Some(value.clone()),
-                    RemoteOptionalTextUpdateV2::Clear => None,
-                };
-            }
-            if let Some(location) = &fields.location {
-                item.location = match location {
-                    RemoteOptionalTextUpdateV2::Set(value) => Some(value.clone()),
-                    RemoteOptionalTextUpdateV2::Clear => None,
-                };
-            }
-            if let Some(time) = fields.time {
-                item.start_at_utc_ms = Some(time.start_at_utc_ms);
-                item.end_at_utc_ms = Some(time.end_at_utc_ms);
+            if let Ok(fields) = &fields {
+                if let Some(title) = &fields.title {
+                    item.title = title.clone();
+                }
+                if let Some(description) = &fields.description {
+                    item.notes = match description {
+                        RemoteOptionalTextUpdateV2::Set(value) => Some(value.clone()),
+                        RemoteOptionalTextUpdateV2::Clear => None,
+                    };
+                }
+                if let Some(location) = &fields.location {
+                    item.location = match location {
+                        RemoteOptionalTextUpdateV2::Set(value) => Some(value.clone()),
+                        RemoteOptionalTextUpdateV2::Clear => None,
+                    };
+                }
+                if let Some(time) = fields.time {
+                    item.start_at_utc_ms = Some(time.start_at_utc_ms);
+                    item.end_at_utc_ms = Some(time.end_at_utc_ms);
+                }
             }
             item.remote_edit_eligible = false;
-            item.remote_edit_blocked_reason = Some("此修改仍待同步".into());
+            if !writable {
+                item.remote_time_edit_eligible = false;
+            }
+            item.remote_edit_blocked_reason = Some(
+                if fields.is_err() {
+                    "待同步修改数据损坏（CorruptStoredValue），原记录已保留，需要恢复"
+                } else if !writable {
+                    "历史待同步修改不符合当前发送规则，原修改已保留，需要恢复"
+                } else {
+                    "此修改仍待同步"
+                }
+                .into(),
+            );
             item.pending_remote = Some(PendingRemoteAgendaState {
                 operation_id: operation_id.clone(),
                 account_id: account_id.clone(),
                 kind: PendingRemoteAgendaKind::UpdateEventV3,
-                status: pending_agenda_status(&state, &phase, outcome.as_deref()),
+                status: if !writable {
+                    PendingRemoteAgendaStatus::RecoveryNeeded
+                } else {
+                    pending_agenda_status(&state, &phase, outcome.as_deref())
+                },
+                retry_local_allowed: writable
+                    && state == "conflict"
+                    && remote_update_fields::event_retry_eligible(connection, &operation_id)?,
             });
         }
     }
@@ -10469,12 +10493,53 @@ struct PendingCreationIntent {
     end_at_utc_ms: i64,
 }
 
+fn deletion_retry_eligible(connection: &Connection, id: &str) -> Result<bool, PersistenceError> {
+    let row = connection.query_row(
+        "SELECT d.account_id,d.calendar_id,r.etag,d.base_etag,r.raw_ics,r.exact_href,s.uid,c.collection_url,r.parse_status,r.lifecycle,d.remote_etag,d.remote_raw_ics FROM remote_delete_operations d JOIN remote_resources r ON r.resource_id=d.resource_id AND r.calendar_id=d.calendar_id AND r.series_id=d.series_id JOIN calendars c ON c.calendar_id=d.calendar_id JOIN event_series s ON s.series_id=d.series_id WHERE d.operation_id=?1 AND d.state='conflict' AND d.resolution_state='unresolved' AND d.intent_json='{\"delete\":true}'",
+        [id], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,Vec<u8>>(4)?,r.get::<_,String>(5)?,r.get::<_,String>(6)?,r.get::<_,String>(7)?,r.get::<_,String>(8)?,r.get::<_,String>(9)?,r.get::<_,Option<String>>(10)?,r.get::<_,Option<Vec<u8>>>(11)?))).optional()?;
+    let Some((
+        account,
+        calendar,
+        etag,
+        base,
+        raw,
+        href,
+        uid,
+        route,
+        parsed,
+        lifecycle,
+        remote_etag,
+        remote_raw,
+    )) = row
+    else {
+        return Ok(false);
+    };
+    let remote = match (remote_etag, remote_raw) {
+        (Some(etag), Some(raw_ics)) => RemoteReadBack { etag, raw_ics },
+        _ => return Ok(false),
+    };
+    Ok(
+        scoped_event::selected_calendar_route(connection, &account, &calendar).is_ok()
+            && parsed == "parsed"
+            && lifecycle == "active"
+            && strong_mutation_etag(&etag)
+            && etag != base
+            && resource_belongs_to_collection(&route, &href)
+            && remote.has_bounded_strong_revision()
+            && single_vevent_uid(&remote.raw_ics).is_ok_and(|v| v == uid)
+            && !contains_invitation_property(&raw)
+            && !contains_recurrence_sensitive_property(&raw)
+            && single_vevent_uid(&raw).is_ok_and(|v| v == uid),
+    )
+}
+
 fn overlay_pending_remote_deletions(
     connection: &Connection,
     items: &mut [CalendarAgendaItem],
+    resource: Option<&str>,
 ) -> Result<(), PersistenceError> {
-    let mut statement = connection.prepare("SELECT d.operation_id,d.account_id,d.resource_id,d.state,d.execution_phase,d.last_outcome FROM remote_delete_operations d JOIN calendars c ON c.calendar_id=d.calendar_id JOIN accounts a ON a.account_id=d.account_id WHERE d.state IN ('pending','conflict') AND c.selected=1 AND a.removed_at_ms IS NULL ORDER BY d.created_at_ms,d.operation_id")?;
-    let rows = statement.query_map([], |r| {
+    let mut statement = connection.prepare("SELECT d.operation_id,d.account_id,d.resource_id,d.state,d.execution_phase,d.last_outcome FROM remote_delete_operations d JOIN calendars c ON c.calendar_id=d.calendar_id JOIN accounts a ON a.account_id=d.account_id WHERE d.state IN ('pending','conflict') AND c.selected=1 AND a.removed_at_ms IS NULL AND (?1 IS NULL OR d.resource_id=?1) ORDER BY d.created_at_ms,d.operation_id")?;
+    let rows = statement.query_map([resource], |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, String>(1)?,
@@ -10499,6 +10564,8 @@ fn overlay_pending_remote_deletions(
                 } else {
                     pending_agenda_status(&state, &phase, outcome.as_deref())
                 },
+                retry_local_allowed: state == "conflict"
+                    && deletion_retry_eligible(connection, &operation)?,
             });
         }
     }
@@ -10509,6 +10576,7 @@ fn append_pending_remote_creations(
     connection: &Connection,
     display_now_utc_ms: Option<i64>,
     items: &mut Vec<CalendarAgendaItem>,
+    resource: Option<&str>,
 ) -> Result<(), PersistenceError> {
     let mut statement = connection.prepare(
         "SELECT o.operation_id,o.idempotency_key,o.account_id,o.calendar_id,o.resource_id,o.intent_json,o.state,o.execution_phase,o.attempts,
@@ -10516,11 +10584,11 @@ fn append_pending_remote_creations(
          FROM remote_create_operations o
          JOIN calendars c ON c.calendar_id=o.calendar_id
          JOIN accounts a ON a.account_id=o.account_id
-         WHERE o.intent_version='utc-v2' AND o.state='pending' AND c.selected=1 AND a.removed_at_ms IS NULL
+         WHERE o.intent_version='utc-v2' AND o.state='pending' AND c.selected=1 AND a.removed_at_ms IS NULL AND (?1 IS NULL OR o.resource_id=?1)
          ORDER BY o.created_at_ms,o.operation_id",
     )?;
     let rows = statement
-        .query_map([], |row| {
+        .query_map([resource], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -10604,6 +10672,7 @@ fn append_pending_remote_creations(
             remote_edit_blocked_reason: Some("此日程仍待同步".into()),
             remote_time_edit_eligible: false,
             pending_remote: Some(PendingRemoteAgendaState {
+                retry_local_allowed: false,
                 operation_id,
                 account_id,
                 kind: PendingRemoteAgendaKind::CreateUtcV2,
@@ -11177,6 +11246,13 @@ fn list_calendar_agenda_items(
     connection: &Connection,
     display_now_utc_ms: Option<i64>,
 ) -> Result<Vec<CalendarAgendaItem>, PersistenceError> {
+    list_calendar_agenda_items_selected(connection, display_now_utc_ms, None)
+}
+fn list_calendar_agenda_items_selected(
+    connection: &Connection,
+    display_now_utc_ms: Option<i64>,
+    identity: Option<(&str, &str, &str)>,
+) -> Result<Vec<CalendarAgendaItem>, PersistenceError> {
     let mut statement = connection.prepare(
         "SELECT p.series_id,p.resource_id,p.recurrence_key,p.calendar_id,c.display_name,p.title,p.notes,p.location,
                 p.start_at_utc_ms,p.end_at_utc_ms,p.all_day,p.projection_status,p.unsupported_reason,
@@ -11188,6 +11264,7 @@ fn list_calendar_agenda_items(
          LEFT JOIN work_item_state w ON w.source_kind='calendar_occurrence'
               AND w.calendar_series_id=p.series_id AND w.recurrence_key=p.recurrence_key
          WHERE r.lifecycle='active' AND p.cancelled=0 AND a.removed_at_ms IS NULL AND c.selected=1
+           AND (?3 IS NULL OR (c.available=1 AND p.series_id=?3 AND p.resource_id=?4 AND p.recurrence_key=?5))
            AND NOT (p.recurrence_key=?2 AND EXISTS(
                SELECT 1 FROM calendar_resource_recurrence rr
                WHERE rr.resource_id=p.resource_id AND rr.enabled=1
@@ -11200,7 +11277,13 @@ fn list_calendar_agenda_items(
     )?;
     let mut items = statement
         .query_map(
-            params![display_now_utc_ms, SINGLETON_OCCURRENCE_KEY],
+            params![
+                display_now_utc_ms,
+                SINGLETON_OCCURRENCE_KEY,
+                identity.map(|v| v.0),
+                identity.map(|v| v.1),
+                identity.map(|v| v.2)
+            ],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -11302,9 +11385,14 @@ fn list_calendar_agenda_items(
             })
         })
         .collect::<Result<Vec<_>, PersistenceError>>()?;
-    overlay_pending_remote_updates(connection, &mut items)?;
-    overlay_pending_remote_deletions(connection, &mut items)?;
-    append_pending_remote_creations(connection, display_now_utc_ms, &mut items)?;
+    overlay_pending_remote_updates(connection, &mut items, identity.map(|v| v.1))?;
+    overlay_pending_remote_deletions(connection, &mut items, identity.map(|v| v.1))?;
+    append_pending_remote_creations(
+        connection,
+        display_now_utc_ms,
+        &mut items,
+        identity.map(|v| v.1),
+    )?;
     items.sort_by(|left, right| {
         left.start_at_utc_ms
             .is_none()
@@ -12383,9 +12471,6 @@ fn unix_time_ms() -> Result<i64, PersistenceError> {
 
 #[derive(Debug, Error)]
 pub enum PersistenceError {
-    #[cfg(feature = "dev-test")]
-    #[error("development Probe prerequisite failed")]
-    DevProbePrerequisite(&'static str),
     #[error("connect the iCloud account before changing its remote calendar")]
     RemoteAccountConnectionRequired,
     #[error("scoped event retry requires a newer committed remote revision")]
@@ -12479,10 +12564,3 @@ impl CommittedEventScheduleChange {
         self.changed && self.account == account
     }
 }
-
-#[cfg(test)]
-#[path = "persistence/tzid_projection_tests.rs"]
-mod tzid_projection_tests;
-
-#[cfg(test)]
-mod reminder_admission_tests;

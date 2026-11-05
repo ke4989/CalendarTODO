@@ -12,7 +12,6 @@ use windows_sys::Win32::{
     },
 };
 
-
 /// Smallest and largest popover height a tray menu page may request. The value
 /// is a bound on untrusted content measurement, not a layout preference.
 pub const TRAY_MENU_MIN_HEIGHT_DIP: f64 = 96.0;
@@ -529,4 +528,3 @@ pub fn tray_popover_origin(
     }
     (x, y)
 }
-

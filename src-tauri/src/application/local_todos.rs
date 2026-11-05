@@ -54,14 +54,17 @@ impl LocalTodoService {
             .set_local_calendar_hidden(input.calendar_id, input.hidden)?)
     }
 
-    /// Delete one local calendar after reassigning its tasks to a remaining
-    /// visible calendar. No task is ever deleted implicitly.
+    /// Permanently delete a confirmed local calendar and all its local contents.
     pub fn delete_calendar(
         &self,
         input: DeleteLocalCalendar,
     ) -> Result<DeletedLocalCalendar, LocalTodoServiceError> {
         let input = input.validate()?;
-        Ok(self.database.delete_local_calendar(input.calendar_id)?)
+        let crate::domain::local_todo::LocalCalendarDeleteConfirmation::Confirmed =
+            input.confirmation;
+        Ok(self
+            .database
+            .delete_local_calendar_contents(input.calendar_id)?)
     }
 
     pub fn move_to_calendar(

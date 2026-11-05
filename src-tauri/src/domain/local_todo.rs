@@ -82,9 +82,16 @@ impl SetLocalCalendarHidden {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeleteLocalCalendar {
     pub calendar_id: String,
+    pub confirmation: LocalCalendarDeleteConfirmation,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalCalendarDeleteConfirmation {
+    Confirmed,
 }
 
 impl DeleteLocalCalendar {
@@ -94,12 +101,11 @@ impl DeleteLocalCalendar {
     }
 }
 
-/// Bounded result of deleting one local calendar. Deletion never destroys a
-/// task: every task owned by the removed calendar is reassigned first.
+/// Result of explicitly confirmed permanent local calendar content deletion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeletedLocalCalendar {
-    pub moved_todos: u32,
+    pub deleted_todos: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]

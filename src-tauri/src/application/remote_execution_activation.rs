@@ -334,29 +334,6 @@ impl RemoteExecutionActivation {
         Ok(())
     }
 
-    pub(crate) fn submit(&self, account: &str) -> Result<MutationRuntimeView, ()> {
-        let _transition = self.transition.lock().map_err(|_| ())?;
-        if !self.eligible(account) {
-            return Err(());
-        }
-        let (graph, permit) = {
-            let graphs = self.graphs.lock().map_err(|_| ())?;
-            let entry = graphs.get(account).ok_or(())?;
-            if entry.scoped_only {
-                return Err(());
-            }
-            (
-                entry.graph.clone(),
-                ActivationPermit {
-                    graph: Arc::downgrade(&entry.graph),
-                    enabled: Arc::downgrade(&entry.enabled),
-                    event: None,
-                },
-            )
-        };
-        graph.submit_activated(permit)
-    }
-
     pub(crate) fn submit_scoped_event(
         &self,
         binding: crate::adapters::production_mutation::exact_probe::ExactProbeBinding,

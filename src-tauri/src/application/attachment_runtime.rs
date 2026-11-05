@@ -23,15 +23,6 @@ pub const ATTACHMENT_STATE_EVENT: &str = "calendar-todo://attachment-state";
 
 // Lifecycle registration only. No ordinary discovery, reads, sync or deadlines.
 
-#[allow(dead_code)]
-mod probe_completion;
-#[allow(dead_code)]
-mod probe_controller;
-#[allow(dead_code)]
-mod probe_diagnostic;
-pub(crate) use probe_controller::ProbeControllerScope;
-pub(crate) use probe_diagnostic::ProbeLocalClosure;
-
 /// Weak, execution-free metadata for one exact captured attachment/session.
 #[derive(Clone)]
 pub(crate) struct ConflictAttachmentOwner {
@@ -72,23 +63,6 @@ impl ConflictAttachmentOwner {
         };
         binding.revalidate_under_gate(&gate)
     }
-    pub(crate) fn probe_acquisition_current(
-        &self,
-        scope: &crate::adapters::production_mutation::probe_preflight::live_acquisition::AcquisitionScope,
-    ) -> bool {
-        let Some(inner) = self.runtime.upgrade() else {
-            return false;
-        };
-        let runtime = AttachmentRuntime { inner };
-        let Ok(requests) = runtime.inner.lock_requests() else {
-            return false;
-        };
-        let gate = ClosedCompositionGate {
-            attachments: &runtime,
-            _requests: &requests,
-        };
-        self.matches_gate(&gate) && scope.under_gate(&gate)
-    }
     /// Actor-thread check only; durable eligibility is rechecked by that actor.
     pub(crate) fn probe_seed_owner_alive(
         &self,
@@ -115,24 +89,6 @@ impl ConflictAttachmentOwner {
                 .is_current_attachment(&self.account, self.generation)
     }
     /// Dedicated short gate check; never retain the attachment lock over I/O.
-    pub(crate) fn revalidate_probe_metadata(
-        &self,
-        prepared: crate::adapters::production_mutation::probe_preflight::PreparedProbeMetadata,
-    ) -> Result<crate::adapters::production_mutation::probe_preflight::PreparedProbeMetadata, ()>
-    {
-        let runtime = AttachmentRuntime {
-            inner: self.runtime.upgrade().ok_or(())?,
-        };
-        let requests = runtime.inner.lock_requests().map_err(|_| ())?;
-        let gate = ClosedCompositionGate {
-            attachments: &runtime,
-            _requests: &requests,
-        };
-        if !self.matches_gate(&gate) {
-            return Err(());
-        }
-        prepared.revalidate(&gate)
-    }
     pub(crate) fn matches_gate(&self, gate: &ClosedCompositionGate<'_>) -> bool {
         std::sync::Weak::ptr_eq(&self.runtime, &Arc::downgrade(&gate.attachments().inner))
     }
@@ -438,14 +394,6 @@ impl ClosedCompositionGate<'_> {
 }
 
 impl AttachmentRuntime {
-    pub(crate) fn prepare_probe_harness(&self, sessions: &Arc<crate::adapters::production_mutation::ProductionMutationSessions>, account: &str) -> Result<(crate::adapters::production_mutation::probe_preflight::ProbeSourceOwner, crate::adapters::production_mutation::probe_preflight::live_acquisition::PreparedAcquisition), ()>{
-        let requests = self.inner.lock_requests().map_err(|_| ())?;
-        let gate = ClosedCompositionGate {
-            attachments: self,
-            _requests: &requests,
-        };
-        sessions.prepare_probe_acquisition(&gate, account)
-    }
     pub(crate) fn same_owner(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
@@ -718,19 +666,6 @@ impl AttachmentRuntime {
             .ok_or(())?;
         owner.register(account, generation)?;
         Ok(())
-    }
-
-    #[allow(dead_code)] // Internal collection binding; no product dispatch entry.
-    pub(crate) fn exact_probe_binding(
-        &self,
-        sessions: &Arc<crate::adapters::production_mutation::ProductionMutationSessions>,
-    ) -> Result<crate::adapters::production_mutation::exact_probe::ExactProbeBinding, ()> {
-        let requests = self.inner.lock_requests().map_err(|_| ())?;
-        let gate = ClosedCompositionGate {
-            attachments: self,
-            _requests: &requests,
-        };
-        sessions.bind_exact_probe_collections(&gate)
     }
 
     pub(crate) fn connected_owner_current(
@@ -1393,11 +1328,7 @@ impl Inner {
             }
             Ok(account)
         });
-        let source_mode = Some(if request.production {
-            SourceAttachmentMode::IcloudChinaReadOnly
-        } else {
-            SourceAttachmentMode::Synthetic
-        });
+        let source_mode = Some(SourceAttachmentMode::IcloudChinaReadOnly);
         let view = match result {
             Ok(_) if self.registry.attachment_generation(account_id).is_some() => {
                 // An accepted outcome is still "ready" when the stored

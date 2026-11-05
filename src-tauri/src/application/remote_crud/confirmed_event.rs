@@ -101,7 +101,7 @@ pub(crate) fn parse_confirmed(input: &str) -> Result<ConfirmedEventRequest, Remo
     if input.len() > MAX_INPUT_BYTES {
         return Err(RemoteCrudError::InvalidInput);
     }
-    serde_json::from_str(input).map_err(|_| RemoteCrudError::InvalidInput)
+    serde_json::from_str(input).map_err(|error| RemoteCrudError::InvalidInput)
 }
 impl ConfirmedEventView {
     pub(crate) fn from_runtime(
@@ -340,7 +340,22 @@ impl RemoteCrudApplication {
                 Ok(self.scoped_view(&scope, Some(execution), failure))
             }
             ConfirmedEventRequest::ResolveConflict { input } => {
-                let scope = self.captured_scope(&input.scope)?;
+                let scope = self
+                    .database
+                    .capture_conflict_scope(
+                        exact_kind(&input.scope),
+                        input.scope.operation_id.clone(),
+                        input.scope.account_id.clone(),
+                        input.scope.calendar_id.clone(),
+                        input.scope.resource_id.clone(),
+                    )
+                    .or_else(|_| {
+                        // An exact replay in this process retains the existing
+                        // idempotent resolution behavior; unresolved restart
+                        // recovery is always actor-selected above.
+                        self.captured_scope(&input.scope)
+                            .map_err(|_| PersistenceError::RemoteMutationReadOnly)
+                    })?;
                 let result = if input.choice == ConflictResolutionChoice::RetryLocal {
                     let execution = execution.ok_or(RemoteCrudError::Persistence(
                         PersistenceError::RemoteAccountConnectionRequired,

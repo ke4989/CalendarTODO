@@ -2,8 +2,6 @@
 //! and one one-shot timer; all native mutation is dispatched to the HWND owner.
 #[path = "desktop_recovery.rs"]
 mod recovery;
-#[path = "windows_desktop_trace.rs"]
-mod trace;
 
 use crate::domain::settings::WindowMode;
 pub(crate) use recovery::Request;
@@ -17,7 +15,6 @@ use std::{
     },
     thread::{self, JoinHandle},
 };
-use trace::DesktopTrace;
 use windows_sys::Win32::{
     Foundation::{HWND, LPARAM},
     Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute},
@@ -46,7 +43,6 @@ static ACTIVE_EPISODE: AtomicU64 = AtomicU64::new(0);
 static OBSERVER_THREAD: AtomicU32 = AtomicU32::new(0);
 static HANDLER: OnceLock<Box<dyn Fn(Request) + Send + Sync>> = OnceLock::new();
 static RESULTS: OnceLock<mpsc::Sender<(Request, Option<bool>)>> = OnceLock::new();
-static TRACE: OnceLock<DesktopTrace> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DesktopWindowState {
@@ -345,16 +341,6 @@ pub(crate) fn request_restore() {
     signal(Signal::Minimized);
 }
 pub(crate) fn completed(request: Request, healthy: Option<bool>) {
-    if let Some(trace) = TRACE.get() {
-        trace.result(
-            request.generation,
-            request.episode,
-            request.attempt,
-            healthy,
-            observed_window(),
-            window_state(observed_window()),
-        );
-    }
     if let Some(results) = RESULTS.get()
         && results.send((request, healthy)).is_ok()
     {
@@ -374,13 +360,6 @@ unsafe extern "system" fn win_event_proc(
     let observed = observed_window();
     if observed.is_null() {
         return;
-    }
-    if let Some(trace) = TRACE.get()
-        && (event == EVENT_SYSTEM_FOREGROUND || window == observed)
-    {
-        if let Some(state) = window_state(observed) {
-            trace.event(event, observed, state);
-        }
     }
     if event == EVENT_SYSTEM_FOREGROUND {
         if unsafe { is_explorer_desktop_surface(window) } {
@@ -417,9 +396,6 @@ where
     }
     let (sender, receiver) = mpsc::channel();
     RESULTS.set(sender).ok()?;
-    if let Some(trace) = DesktopTrace::from_environment() {
-        let _ = TRACE.set(trace);
-    }
     let (ready_sender, ready) = mpsc::sync_channel(1);
     let observer = thread::Builder::new()
         .name("calendar-todo-desktop-observer".into())
@@ -547,4 +523,3 @@ fn run_message_loop(
         }
     }
 }
-

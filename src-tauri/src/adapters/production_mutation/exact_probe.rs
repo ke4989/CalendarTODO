@@ -1,11 +1,8 @@
 //! Exact committed product collection binding. No discovery or dispatch.
 use super::{ProductionMutationSessions, ProductionTitleMutationTransport};
-use crate::{
-    adapters::persistence::probe_target::CommittedExactProbeCollections,
-    application::{
-        attachment_runtime::{ClosedCompositionGate, ConflictAttachmentOwner},
-        production_creation_owner::CreationSessionEvidence,
-    },
+use crate::application::{
+    attachment_runtime::{ClosedCompositionGate, ConflictAttachmentOwner},
+    production_creation_owner::CreationSessionEvidence,
 };
 use std::sync::{Arc, Weak};
 
@@ -18,16 +15,11 @@ pub(crate) struct ExactProbeBinding {
     runtime: ConflictAttachmentOwner,
 }
 enum BindingCollections {
-    Probe(CommittedExactProbeCollections),
     Selected(crate::adapters::persistence::scoped_event::ScopedEventSnapshot),
 }
 impl BindingCollections {
     fn account_and_routes(&self) -> (&str, Vec<&str>) {
         match self {
-            Self::Probe(pair) => {
-                let (account, routes) = pair.account_and_routes();
-                (account, routes.to_vec())
-            }
             Self::Selected(scope) => {
                 let (account, route) = scope.account_and_route();
                 (account, vec![route])
@@ -36,7 +28,6 @@ impl BindingCollections {
     }
     fn matches_actor(&self, actor: &Weak<()>) -> bool {
         match self {
-            Self::Probe(pair) => pair.matches_actor(actor),
             Self::Selected(scope) => scope.matches_actor(actor),
         }
     }
@@ -58,7 +49,6 @@ impl ExactProbeBinding {
                 && scope.matches_actor(&sessions.database.actor_provenance())
                 && match &self.collections {
                     BindingCollections::Selected(selected) => selected.ids() == scope.ids(),
-                    BindingCollections::Probe(_) => true,
                 }
         })
     }
@@ -131,12 +121,6 @@ impl ExactProbeBinding {
             return Err(());
         }
         self.collections = match self.collections {
-            BindingCollections::Probe(pair) => BindingCollections::Probe(
-                sessions
-                    .database
-                    .revalidate_exact_probe_collections(pair)
-                    .map_err(|_| ())?,
-            ),
             BindingCollections::Selected(scope) => {
                 sessions
                     .database
@@ -205,78 +189,6 @@ impl ProductionMutationSessions {
             concrete: Arc::downgrade(&concrete),
             session,
             runtime,
-        }
-        .revalidate_under_gate(gate)
-    }
-    pub(crate) fn exact_probe_owner_account(
-        self: &Arc<Self>,
-        gate: &ClosedCompositionGate<'_>,
-    ) -> Result<String, ()> {
-        if !gate
-            .attachments()
-            .owns_activation_sessions(&self.accounts, self)
-            || !self.database.matches_clock(&self.clock)
-            || self
-                .creation_closed
-                .load(std::sync::atomic::Ordering::SeqCst)
-        {
-            return Err(());
-        }
-        let collections = self.database.exact_probe_collections().map_err(|_| ())?;
-        let (account, routes) = collections.account_and_routes();
-        let binding = self
-            .database
-            .icloud_binding(account.to_owned())
-            .map_err(|_| ())?
-            .ok_or(())?;
-        let policy = crate::adapters::caldav_transport::DavTransportPolicy::icloud_bound(
-            &binding,
-            routes.iter().map(|route| (*route).to_owned()),
-        )
-        .map_err(|_| ())?;
-        let origin = url::Url::parse(&binding.home_url).map_err(|_| ())?;
-        if !collections.matches_actor(&self.database.actor_provenance())
-            || !routes
-                .into_iter()
-                .all(|route| policy.probe_collection_matches(&origin, route))
-        {
-            return Err(());
-        }
-        Ok(account.to_owned())
-    }
-    pub(crate) fn bind_exact_probe_collections(
-        self: &Arc<Self>,
-        gate: &ClosedCompositionGate<'_>,
-    ) -> Result<ExactProbeBinding, ()> {
-        let runtime = gate.attachments();
-        if !runtime.owns_activation_sessions(&self.accounts, self)
-            || !self.database.matches_clock(&self.clock)
-        {
-            return Err(());
-        }
-        let collections = self.database.exact_probe_collections().map_err(|_| ())?;
-        let (account, routes) = collections.account_and_routes();
-        let (registry, actor) = self.accounts.creation_owner_provenance();
-        if !collections.matches_actor(&actor) {
-            return Err(());
-        }
-        let (_, session, _) = runtime.creation_owner_evidence_under_gate(account, gate)?;
-        let captured_runtime =
-            runtime.conflict_owner_under_gate(gate, account, &registry, &actor)?;
-        let concrete = self.session(account).map_err(|_| ())?;
-        if !routes.into_iter().all(|route| {
-            concrete
-                .policy
-                .probe_collection_matches(&concrete.entry_url, route)
-        }) {
-            return Err(());
-        }
-        ExactProbeBinding {
-            collections: BindingCollections::Probe(collections),
-            sessions: Arc::downgrade(self),
-            concrete: Arc::downgrade(&concrete),
-            session,
-            runtime: captured_runtime,
         }
         .revalidate_under_gate(gate)
     }

@@ -124,6 +124,7 @@ pub enum PendingRemoteAgendaStatus {
     Pending,
     RetryNeeded,
     Conflict,
+    RecoveryNeeded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -133,6 +134,7 @@ pub struct PendingRemoteAgendaState {
     pub account_id: String,
     pub kind: PendingRemoteAgendaKind,
     pub status: PendingRemoteAgendaStatus,
+    pub retry_local_allowed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

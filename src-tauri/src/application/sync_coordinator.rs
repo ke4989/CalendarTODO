@@ -67,6 +67,7 @@ pub struct CoordinatorReport {
 pub struct AccountSyncCoordinator {
     account_id: String,
     source: Arc<dyn ReadOnlyCalendarSource + Send + Sync>,
+    read_lane: Arc<std::sync::Mutex<()>>,
     sender: Option<SyncSender<Message>>,
     worker: Option<JoinHandle<()>>,
 }
@@ -95,18 +96,38 @@ impl AccountSyncCoordinator {
         let (sender, receiver) = mpsc::sync_channel(64);
         let worker_account_id = account_id.clone();
         let worker_source = source.clone();
+        let read_lane = Arc::new(std::sync::Mutex::new(()));
+        let worker_lane = read_lane.clone();
         let worker = thread::Builder::new()
             .name("calendar-todo-sync-coordinator".into())
-            .spawn(move || run_worker(service, worker_source, receiver, worker_account_id, policy))
+            .spawn(move || {
+                run_worker(
+                    service,
+                    worker_source,
+                    receiver,
+                    worker_account_id,
+                    policy,
+                    worker_lane,
+                )
+            })
             .map_err(|_| CoordinatorError::WorkerUnavailable)?;
         Ok(Self {
             account_id,
             source,
+            read_lane,
             sender: Some(sender),
             worker: Some(worker),
         })
     }
 
+    pub(crate) fn range_reader(
+        &self,
+    ) -> (
+        Arc<dyn ReadOnlyCalendarSource + Send + Sync>,
+        Arc<std::sync::Mutex<()>>,
+    ) {
+        (self.source.clone(), self.read_lane.clone())
+    }
     pub fn account_id(&self) -> &str {
         &self.account_id
     }
@@ -197,6 +218,7 @@ fn run_worker(
     receiver: Receiver<Message>,
     account_id: String,
     policy: BackoffPolicy,
+    read_lane: Arc<std::sync::Mutex<()>>,
 ) {
     let mut consecutive_failures = 0_u32;
     let mut next_allowed_at = Instant::now();
@@ -231,15 +253,17 @@ fn run_worker(
             }
         }
 
-        let result = service.run_incremental_or_full(source.as_ref(), batch.trigger);
+        let result = {
+            let Ok(_read_guard) = read_lane.lock() else {
+                return;
+            };
+            service.sync_incremental_or_full(source.as_ref(), batch.trigger)
+        };
         let (outcome, delay) = match result {
-            Ok(result) => {
+            Ok(path) => {
                 consecutive_failures = 0;
                 next_allowed_at = Instant::now();
-                (
-                    CoordinatorOutcome::Success { path: result.path },
-                    Duration::ZERO,
-                )
+                (CoordinatorOutcome::Success { path }, Duration::ZERO)
             }
             Err(error) => {
                 consecutive_failures = consecutive_failures.saturating_add(1);

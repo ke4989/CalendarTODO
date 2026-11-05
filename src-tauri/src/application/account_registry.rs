@@ -117,6 +117,45 @@ impl AccountSourceRegistry {
             .collect())
     }
 
+    pub(crate) fn collect_range(
+        &self,
+        account: &str,
+        request: &crate::ports::calendar_range::CalendarRangeRequest,
+    ) -> Result<(u64, crate::ports::calendar_range::CalendarRangeSegment), AccountRegistryError>
+    {
+        let (generation, source, lane) = {
+            let registrations = self
+                .coordinators
+                .lock()
+                .map_err(|_| AccountRegistryError::Unavailable)?;
+            let registration = registrations
+                .get(account)
+                .ok_or(AccountRegistryError::SourceUnavailable)?;
+            let (source, lane) = registration.coordinator.range_reader();
+            (registration.generation, source, lane)
+        };
+        if self.attachment_generation(account) != Some(generation)
+            || request.cancellation.is_cancelled()
+            || !self.profile(account)?.enabled
+        {
+            return Err(AccountRegistryError::Cancelled);
+        }
+        let result = {
+            let _guard = lane.lock().map_err(|_| AccountRegistryError::Unavailable)?;
+            if request.cancellation.is_cancelled() {
+                return Err(AccountRegistryError::Cancelled);
+            }
+            source
+                .collect_calendar_range(request)
+                .map_err(|_| AccountRegistryError::Unavailable)?
+        };
+        if self.attachment_generation(account) != Some(generation)
+            || request.cancellation.is_cancelled()
+        {
+            return Err(AccountRegistryError::Cancelled);
+        }
+        Ok((generation, result))
+    }
     pub fn profile(&self, account_id: &str) -> Result<AccountProfile, AccountRegistryError> {
         validate_account_id(account_id).map_err(|_| AccountRegistryError::InvalidIdentity)?;
         self.database

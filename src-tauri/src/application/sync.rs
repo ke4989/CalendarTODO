@@ -38,15 +38,16 @@ impl ReadOnlySyncService {
         source: &dyn ReadOnlyCalendarSource,
         trigger: SyncTrigger,
     ) -> Result<Vec<CachedCalendarResource>, ReadOnlySyncError> {
-        self.run_full_inventory_with_stale_retry(source, trigger, true)
+        self.sync_full_inventory_with_stale_retry(source, trigger, true)?;
+        Ok(self.database.list_cached_calendar_resources()?)
     }
 
-    fn run_full_inventory_with_stale_retry(
+    fn sync_full_inventory_with_stale_retry(
         &self,
         source: &dyn ReadOnlyCalendarSource,
         trigger: SyncTrigger,
         retry_stale_capture: bool,
-    ) -> Result<Vec<CachedCalendarResource>, ReadOnlySyncError> {
+    ) -> Result<(), ReadOnlySyncError> {
         let account_id = source.account_id().to_owned();
         Uuid::parse_str(&account_id).map_err(|_| CalendarSyncError::InvalidIdentity)?;
         if !self.should_read_calendar_scope(&account_id)? {
@@ -58,7 +59,7 @@ impl ReadOnlySyncService {
                 0,
                 0,
             )?;
-            return Ok(self.database.list_cached_calendar_resources()?);
+            return Ok(());
         }
         let capture = self.database.begin_sync_capture(account_id.clone())?;
         let stage = match source.collect_full_inventory() {
@@ -92,7 +93,7 @@ impl ReadOnlySyncService {
             .promote_captured_account_inventory(capture, stage)
         {
             if retry_stale_capture && matches!(error, PersistenceError::StaleSyncCapture) {
-                return self.run_full_inventory_with_stale_retry(source, trigger, false);
+                return self.sync_full_inventory_with_stale_retry(source, trigger, false);
             }
             self.record_failure(&account_id, trigger, persistence_failure_class(&error))?;
             return Err(ReadOnlySyncError::Persistence(error));
@@ -105,7 +106,7 @@ impl ReadOnlySyncService {
             calendar_count,
             resource_count,
         )?;
-        Ok(self.database.list_cached_calendar_resources()?)
+        Ok(())
     }
 
     pub fn run_incremental_or_full(
@@ -113,15 +114,30 @@ impl ReadOnlySyncService {
         source: &dyn ReadOnlyCalendarSource,
         trigger: SyncTrigger,
     ) -> Result<IncrementalSyncResult, ReadOnlySyncError> {
-        self.run_incremental_or_full_with_stale_retry(source, trigger, true)
+        let path = self.sync_incremental_or_full(source, trigger)?;
+        Ok(IncrementalSyncResult {
+            path,
+            resources: self.database.list_cached_calendar_resources()?,
+        })
     }
 
-    fn run_incremental_or_full_with_stale_retry(
+    /// Product synchronization needs only the committed path. Materializing
+    /// every account's raw cache after each run is reserved for callers that
+    /// explicitly ask for it.
+    pub fn sync_incremental_or_full(
+        &self,
+        source: &dyn ReadOnlyCalendarSource,
+        trigger: SyncTrigger,
+    ) -> Result<IncrementalSyncPath, ReadOnlySyncError> {
+        self.sync_incremental_or_full_with_stale_retry(source, trigger, true)
+    }
+
+    fn sync_incremental_or_full_with_stale_retry(
         &self,
         source: &dyn ReadOnlyCalendarSource,
         trigger: SyncTrigger,
         retry_stale_capture: bool,
-    ) -> Result<IncrementalSyncResult, ReadOnlySyncError> {
+    ) -> Result<IncrementalSyncPath, ReadOnlySyncError> {
         let account_id = source.account_id().to_owned();
         Uuid::parse_str(&account_id).map_err(|_| CalendarSyncError::InvalidIdentity)?;
         if !self.should_read_calendar_scope(&account_id)? {
@@ -133,23 +149,14 @@ impl ReadOnlySyncService {
                 0,
                 0,
             )?;
-            return Ok(IncrementalSyncResult {
-                path: IncrementalSyncPath::Incremental,
-                resources: self.database.list_cached_calendar_resources()?,
-            });
+            return Ok(IncrementalSyncPath::Incremental);
         }
         let (capture, requests) = self
             .database
             .begin_incremental_sync_capture(account_id.clone())?;
         if requests.is_empty() {
-            return Ok(IncrementalSyncResult {
-                path: IncrementalSyncPath::FullInventoryFallback,
-                resources: self.run_full_inventory_with_stale_retry(
-                    source,
-                    trigger,
-                    retry_stale_capture,
-                )?,
-            });
+            self.sync_full_inventory_with_stale_retry(source, trigger, retry_stale_capture)?;
+            return Ok(IncrementalSyncPath::FullInventoryFallback);
         }
         for request in &requests {
             request.validate()?;
@@ -157,14 +164,8 @@ impl ReadOnlySyncService {
         let stage = match source.collect_incremental(&requests) {
             Ok(stage) => stage,
             Err(ProviderReadError::InvalidSyncToken) => {
-                return Ok(IncrementalSyncResult {
-                    path: IncrementalSyncPath::FullInventoryFallback,
-                    resources: self.run_full_inventory_with_stale_retry(
-                        source,
-                        trigger,
-                        retry_stale_capture,
-                    )?,
-                });
+                self.sync_full_inventory_with_stale_retry(source, trigger, retry_stale_capture)?;
+                return Ok(IncrementalSyncPath::FullInventoryFallback);
             }
             Err(error) => {
                 self.record_failure(&account_id, trigger, error.failure_class())?;
@@ -195,7 +196,7 @@ impl ReadOnlySyncService {
             .promote_captured_account_incremental(capture, stage)
         {
             if retry_stale_capture && matches!(error, PersistenceError::StaleSyncCapture) {
-                return self.run_incremental_or_full_with_stale_retry(source, trigger, false);
+                return self.sync_incremental_or_full_with_stale_retry(source, trigger, false);
             }
             self.record_failure(&account_id, trigger, persistence_failure_class(&error))?;
             return Err(ReadOnlySyncError::Persistence(error));
@@ -208,10 +209,7 @@ impl ReadOnlySyncService {
             calendar_count,
             resource_count,
         )?;
-        Ok(IncrementalSyncResult {
-            path: IncrementalSyncPath::Incremental,
-            resources: self.database.list_cached_calendar_resources()?,
-        })
+        Ok(IncrementalSyncPath::Incremental)
     }
 
     pub fn list_sync_runs(&self) -> Result<Vec<SyncRunSummary>, ReadOnlySyncError> {

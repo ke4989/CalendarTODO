@@ -52,6 +52,9 @@
   --color-field-selected: color-mix(in srgb, var(--color-surface-soft) 90%, var(--color-text));
   --color-field-disabled: var(--color-surface-soft);
   --field-focus-ring: 0 0 0 2px var(--color-text-muted);
+  --color-search-scope-surface: var(--color-surface-soft);
+  --color-search-input-surface: var(--color-field-idle);
+  --color-search-option-surface: var(--color-surface-soft);
   /*
    * Generic warning surface used by reusable components. Themes that derive
    * their identity from an amber family override these two values so status
