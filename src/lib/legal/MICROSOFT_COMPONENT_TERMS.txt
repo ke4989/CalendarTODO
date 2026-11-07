@@ -1,4 +1,4 @@
-Calendar TODO 0.1.1 — Additional conditions for Microsoft Distributable Code
+Calendar TODO 0.1.2 — Additional conditions for Microsoft Distributable Code
 Version: 2026-10-27
 
 1. Scope and separate licenses

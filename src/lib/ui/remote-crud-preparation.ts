@@ -126,18 +126,21 @@ export function confirmedFailureMessage(code: unknown): string {
     : code === "validation" ? remoteText("此修改未通过本机校验。草稿仍在；请修正后重试相同内容。", "This change failed local validation. Your draft is preserved; correct it and retry the same content.")
     : remoteText("连接、同步或保存未完成。草稿仍在；重试相同内容沿用同一请求。", "The connection, sync, or save did not complete. Your draft is preserved; retrying the same content reuses the same request.");
 }
-function confirmedFailureCode(error: unknown): unknown {
-  if (typeof error === "object" && error !== null && "code" in error && typeof error.code === "string") return error.code;
-  const serialized = typeof error === "string" ? error
-    : error instanceof Error ? error.message
-    : undefined;
+function confirmedErrorFields(error: unknown): Record<string, unknown> | undefined {
+  if (typeof error === "object" && error !== null && "code" in error) return error as Record<string, unknown>;
+  const serialized = typeof error === "string" ? error : error instanceof Error ? error.message : undefined;
   if (!serialized) return undefined;
   try {
     const parsed: unknown = JSON.parse(serialized);
-    return typeof parsed === "object" && parsed !== null && "code" in parsed && typeof parsed.code === "string" ? parsed.code : undefined;
-  } catch {
-    return undefined;
-  }
+    return typeof parsed === "object" && parsed !== null ? parsed as Record<string, unknown> : undefined;
+  } catch { return undefined; }
+}
+function confirmedFailureDiagnostic(fields: Record<string, unknown> | undefined): string {
+  const codes = ["remoteTargetChanged", "remoteSyncUnavailable", "remoteConnectionUnavailable", "remoteAccountConnectionRequired", "remoteEventIdentityChanged", "accountUnavailable", "remoteEventReadOnly", "remoteMutationPending", "mutationUnavailable", "validation"];
+  const stages = ["select", "connect", "sync", "admit", "continuation"];
+  const reasons = ["unsafeCalendarData", "corruptStoredValue", "invalidIdentity", "invalidTitle", "invalidDescription", "staleCapture", "readOnly", "pendingMutation", "idempotencyConflict", "identityConflict", "accountDisabled", "notFound", "actorUnavailable", "sqlite", "clock", "connectionRequired", "persistenceUnavailable", ...codes];
+  const known = (value: unknown, allowed: string[]) => typeof value === "string" && allowed.includes(value) ? value : "unknown";
+  return `code=${known(fields?.code, codes)};stage=${known(fields?.stage, stages)};reason=${known(fields?.reason, reasons)}`;
 }
 
 export interface BackgroundRemoteWriteCallbacks {
@@ -145,7 +148,7 @@ export interface BackgroundRemoteWriteCallbacks {
   failed: (diagnostic: string) => void;
 }
 export type BackgroundRemoteWriteResult =
-  | { started: false; errors: FieldErrors; message: string }
+  | { started: false; errors: FieldErrors; message: string; diagnostic?: string }
   | { started: true; stop: () => void; receipt: RemoteCrudReceipt & { calendarId: string; resourceId: string } };
 
 export async function resolveBackgroundConflict(
@@ -279,7 +282,8 @@ export async function startBackgroundRemoteWrite(
   } catch (error) {
     stopped = true;
     unlisten?.();
-    return { started: false, errors: {}, message: confirmedFailureMessage(confirmedFailureCode(error)) };
+    const fields = confirmedErrorFields(error);
+    return { started: false, errors: {}, message: confirmedFailureMessage(fields?.code), diagnostic: confirmedFailureDiagnostic(fields) };
   }
 }
 export class PreparationSession {
@@ -349,7 +353,7 @@ export class PreparationSession {
       }
       return true;
     } catch (error) {
-      const code = confirmedFailureCode(error);
+      const code = confirmedErrorFields(error)?.code;
       if (this.alive && revision === this.revision) this.change({ phase: "rejected", message: confirmedFailureMessage(code) });
       return false;
     }

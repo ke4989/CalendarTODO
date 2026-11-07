@@ -40,20 +40,20 @@ Keep a smaller view of your tasks in desktop companion or always-on-top mode.
 - **Windows desktop list** — A compact separate window with collapse controls, adjustable background opacity and tray shortcuts.
 - **iCloud Calendar** — Choose calendars to display and synchronize. Enable remote editing to create, update and delete eligible events. A conflict can keep the remote version; a blocked local edit is not written over it and can be retried only as a successor version.
 - **Reminders and appearance** — Windows due reminders while the app is running, Chinese and English UI text, two palettes, and light, dark or system appearance.
-- **Agenda search** — Find local tasks and cached iCloud events. The search covers event titles, locations, notes and similar fields.
-- **Everyday editing** — Drag to reorder and mark items complete. Event edits save automatically.
+- **Agenda search** — Search cached past, future and untimed items in calendars set to display, with selectable title, location, notes and local-tag fields. Uncached iCloud events require an explicit time-range read; recurring results are limited to generated or previously read instances.
+- **Everyday editing** — Drag to reorder and mark items complete. Event edits save automatically. A valid new-item submission closes its dialog and appears as a read-only provisional row in both windows, with draft recovery if saving fails. The main and desktop windows share creation and deletion state; calendar display choices survive a full exit.
 - **Local calendar deletion** — Delete a local calendar and its items.
 
 ## Download and install
 
 The target platform is **Windows x64**, with **Microsoft Edge WebView2 Runtime installed beforehand**. macOS, Linux and ARM64 packages are not provided.
 
-Use the [Releases page](https://github.com/ke4989/CalendarTODO/releases) to find available downloads and version notes.
+Available installers and their version notes are governed by the files actually offered on the [Releases page](https://github.com/ke4989/CalendarTODO/releases).
 
 | Package | Use |
 |---|---|
 | NSIS: `Calendar TODO_<version>_x64-setup.exe` | Preferred for a regular installation |
-| MSI: `Calendar TODO_<version>_x64_en-US.msi` | Optional Windows Installer package, when offered in the release |
+| MSI: `Calendar TODO_<version>_x64_en-US.msi` / `Calendar TODO_<version>_x64_zh-CN.msi` | English / Simplified Chinese Windows Installer packages, when offered in the release |
 
 1. Download one installer and verify its SHA-256 against that release's `SHA256SUMS.txt`.
 2. Make sure WebView2 Runtime is installed, then run the Calendar TODO installer.
@@ -97,14 +97,14 @@ Read [Privacy](doc/PRIVACY.md) for details.
 
 Built with TAURI® 2, Rust, Svelte and SQLite.
 
-Prepare a Windows x64 development environment with Node.js 22.12+ and npm, an MSVC Rust toolchain supporting edition 2024, the Visual Studio 2022 C++ desktop tools and Windows SDK, and CMake. Running the app also requires WebView2 Runtime.
+Prepare a Windows x64 development environment with Node.js 22.12+ and npm, an MSVC Rust toolchain supporting edition 2024, the Visual Studio 2022 Community C++ desktop tools and Windows SDK, and CMake. Running the app also requires WebView2 Runtime.
 
 Keep the checkout at a short path, such as `D:\src\CalendarTODO`, to avoid Windows path-length issues in native dependencies. From a Visual Studio developer terminal with MSVC and Windows SDK variables loaded, run these commands at the repository root:
 
 ```powershell
 npm ci --include=dev
 npm run check
-npm run tauri -- build --target x86_64-pc-windows-msvc --bundles nsis,msi
+npm run tauri -- build --target x86_64-pc-windows-msvc --bundles nsis,msi -- --locked
 ```
 
 Tauri builds the frontend, application and installers. The default output directory is `src-tauri/target/x86_64-pc-windows-msvc/release/bundle/`; if `CARGO_TARGET_DIR` is set, use that location instead. Building and packaging may download public dependencies and installer tools. No real account, credentials, user database or private configuration is needed.

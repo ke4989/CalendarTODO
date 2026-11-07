@@ -36,6 +36,8 @@ struct Alarm {
     repeat: Option<u32>,
     duration_ms: Option<i64>,
     unsupported: bool,
+    uid_seen: bool,
+    apple_uid_seen: bool,
 }
 
 enum Trigger {
@@ -47,11 +49,23 @@ enum Trigger {
 /// Read-only, bounded VALARM projection. Raw ICS remains authoritative. A
 /// detached VEVENT replaces the master's alarms for its original recurrence
 /// slot. This codec reports only explicit alarms; notification policy is separate.
+/// Mutation qualification and proof additionally treat a parameterless `UID` or
+/// Apple `X-WR-ALARMUID` as an opaque alarm identifier that never affects fires.
 pub fn fires_for_occurrence(
     raw: &[u8],
     recurrence_key: &str,
     start: i64,
     end: i64,
+) -> Result<Vec<AlarmFire>, AlarmError> {
+    parse_fires(raw, recurrence_key, start, end, true)
+}
+
+fn parse_fires(
+    raw: &[u8],
+    recurrence_key: &str,
+    start: i64,
+    end: i64,
+    opaque_identifiers: bool,
 ) -> Result<Vec<AlarmFire>, AlarmError> {
     if raw.is_empty() || raw.len() > MAX_RAW || end < start {
         return Err(AlarmError::Invalid);
@@ -160,6 +174,16 @@ pub fn fires_for_occurrence(
                         }
                     }
                     "DESCRIPTION" | "SUMMARY" | "ATTENDEE" | "ATTACH" => {}
+                    "UID" | "X-WR-ALARMUID" if opaque_identifiers && params.is_empty() && !value.is_empty() => {
+                        let seen = if name.eq_ignore_ascii_case("UID") {
+                            &mut a.uid_seen
+                        } else {
+                            &mut a.apple_uid_seen
+                        };
+                        if std::mem::replace(seen, true) {
+                            return Err(AlarmError::Invalid);
+                        }
+                    }
                     _ => a.unsupported = true,
                 }
             }
@@ -232,7 +256,7 @@ pub fn notification_fires_for_occurrence(
     start: i64,
     end: i64,
 ) -> Result<Vec<AlarmFire>, AlarmError> {
-    let mut fires = fires_for_occurrence(raw, recurrence_key, start, end)?;
+    let mut fires = parse_fires(raw, recurrence_key, start, end, false)?;
     if fires.is_empty() {
         fires.push(AlarmFire {
             alarm_index: 0,

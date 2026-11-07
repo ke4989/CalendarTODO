@@ -63,12 +63,6 @@ pub fn acquire() -> Result<InstanceRole, InstanceError> {
     acquire_named(MUTEX_NAME, SHOW_EVENT_NAME)
 }
 
-/// Separate diagnostic ownership; it never signals or launches the product.
-
-/// Ask the running instance to restore its window. A missing event means the
-/// owner is shutting down, which the caller treats as a normal no-op.
-/// Separate development ownership; never touches or signals the product names.
-
 pub fn signal_owner() -> Result<(), InstanceError> {
     signal_named(SHOW_EVENT_NAME)
 }

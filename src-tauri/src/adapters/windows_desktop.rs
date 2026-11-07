@@ -2,7 +2,6 @@
 //! and one one-shot timer; all native mutation is dispatched to the HWND owner.
 #[path = "desktop_recovery.rs"]
 mod recovery;
-
 use crate::domain::settings::WindowMode;
 pub(crate) use recovery::Request;
 use recovery::{Action, Effect, Recovery, Signal};
@@ -43,7 +42,6 @@ static ACTIVE_EPISODE: AtomicU64 = AtomicU64::new(0);
 static OBSERVER_THREAD: AtomicU32 = AtomicU32::new(0);
 static HANDLER: OnceLock<Box<dyn Fn(Request) + Send + Sync>> = OnceLock::new();
 static RESULTS: OnceLock<mpsc::Sender<(Request, Option<bool>)>> = OnceLock::new();
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DesktopWindowState {
     pub visible: bool,
@@ -152,24 +150,39 @@ fn window_class(window: HWND) -> String {
     String::from_utf16_lossy(&buffer[..length as usize])
 }
 
-/// A Shell surface that legitimately represents Show Desktop without owning
-/// `SHELLDLL_DefView`: the taskbars. These are admitted only with additional
-/// native evidence, never as general foreground authority.
+/// Classes that can represent Show Desktop without owning `SHELLDLL_DefView`.
+/// They are delayed-observation triggers only, never Z-order proof.
+pub(crate) fn show_desktop_transition_class(class: &str) -> bool {
+    matches!(
+        class,
+        "Shell_TrayWnd" | "Shell_SecondaryTrayWnd" | "Progman" | "WorkerW"
+    )
+}
+
+/// A Shell-process Show Desktop host. Explorer frames are not included.
+/// Admission still requires the caller to resolve the DefView surface before
+/// any Z-order repair.
 pub(crate) fn transition_surface(window: HWND) -> bool {
     !window.is_null()
         && unsafe { is_shell_process_window(window) }
-        && matches!(
-            window_class(window).as_str(),
-            "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
-        )
+        && show_desktop_transition_class(&window_class(window))
 }
 
-/// Explorer's own foreground-staging helper is not user activity. Every other
-/// foreground window, including Explorer-owned application frames, cancels.
+/// Shell windows that appear during Show Desktop but are not user activity.
+/// They must not cancel an episode the taskbar or desktop already armed.
+pub(crate) fn ignored_shell_foreground_class(class: &str) -> bool {
+    matches!(
+        class,
+        "ForegroundStaging"
+            | "TopLevelWindowForOverflowXamlIsland"
+            | "XamlExplorerHostIslandWindow"
+    )
+}
+
 fn staging_window(window: HWND) -> bool {
     !window.is_null()
         && unsafe { is_shell_process_window(window) }
-        && window_class(window) == "ForegroundStaging"
+        && ignored_shell_foreground_class(&window_class(window))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,6 +276,123 @@ pub fn restore_admitted(enabled: bool, mode: WindowMode) -> bool {
 pub(crate) fn restore_succeeded(state: DesktopWindowState) -> bool {
     state.visible && !state.minimized && state.cloak_reason == 0 && !state.topmost
 }
+
+/// Observation episode verdict: the list is healthy and positively below the
+/// desktop surface, with no visible non-topmost window covering it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObservationVerdict {
+    /// Act: needs_repair is true (unhealthy or Below) and not covered.
+    Repair,
+    /// The list is healthy and Above; end the episode with no action.
+    Healthy,
+    /// Deny: covered, or cannot determine order/cover. Return to Idle.
+    Deny,
+}
+
+pub(crate) fn observation_verdict(
+    hwnd: HWND,
+    state: DesktopWindowState,
+    order: Option<DesktopOrder>,
+) -> ObservationVerdict {
+    if !restore_succeeded(state) || order != Some(DesktopOrder::Below) {
+        return if restore_succeeded(state) && order == Some(DesktopOrder::Above) {
+            ObservationVerdict::Healthy
+        } else {
+            ObservationVerdict::Deny
+        };
+    }
+    match list_covered(hwnd) {
+        Some(false) => ObservationVerdict::Repair,
+        _ => ObservationVerdict::Deny,
+    }
+}
+
+/// None: cannot determine (list not reached, or a rect query failed). Some(true):
+/// at least one visible, non-minimized, uncloaked, non-topmost top-level window
+/// above the list in Z-order overlaps the list rect. Some(false): no such window.
+/// Shell-process Progman, WorkerW, taskbars and staging helpers do not count.
+pub(crate) fn list_covered(hwnd: HWND) -> Option<bool> {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
+    let mut list_rect = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    if unsafe { GetWindowRect(hwnd, &mut list_rect) } == 0 {
+        return None;
+    }
+    struct Cover {
+        list: HWND,
+        list_rect: RECT,
+        covered: bool,
+        reached: bool,
+    }
+    unsafe extern "system" fn visit(window: HWND, data: LPARAM) -> i32 {
+        let cover = unsafe { &mut *(data as *mut Cover) };
+        if window == cover.list {
+            cover.reached = true;
+            return 0;
+        }
+        if unsafe { IsWindowVisible(window) } == 0
+            || unsafe { IsIconic(window) } != 0
+            || unsafe { GetWindowLongPtrW(window, GWL_EXSTYLE) } & WS_EX_TOPMOST as isize != 0
+        {
+            return 1;
+        }
+        let mut reason = 0i32;
+        if unsafe {
+            DwmGetWindowAttribute(
+                window,
+                DWMWA_CLOAKED as u32,
+                ptr::from_mut(&mut reason).cast(),
+                std::mem::size_of_val(&reason) as u32,
+            )
+        } < 0
+            || reason != 0
+        {
+            return 1;
+        }
+        if unsafe { is_shell_process_window(window) } {
+            let class = window_class(window);
+            if show_desktop_transition_class(&class) || ignored_shell_foreground_class(&class) {
+                return 1;
+            }
+        }
+        let mut other = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if unsafe { GetWindowRect(window, &mut other) } == 0 {
+            cover.covered = true;
+            return 0;
+        }
+        if rects_intersect(cover.list_rect, other) {
+            cover.covered = true;
+            return 0;
+        }
+        1
+    }
+    let mut cover = Cover {
+        list: hwnd,
+        list_rect,
+        covered: false,
+        reached: false,
+    };
+    unsafe { EnumWindows(Some(visit), ptr::from_mut(&mut cover) as LPARAM) };
+    if !cover.reached {
+        return None;
+    }
+    Some(cover.covered)
+}
+
+fn rects_intersect(a: windows_sys::Win32::Foundation::RECT, b: windows_sys::Win32::Foundation::RECT) -> bool {
+    a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top
+}
+
 impl Request {
     pub(crate) fn is_current(self) -> bool {
         RESTORE_GENERATION.load(Ordering::SeqCst) == self.generation
@@ -310,6 +440,7 @@ pub fn cancel() {
             episode: 0,
             attempt: 0,
             action: Action::Cancel,
+            observation: false,
         });
     }
 }
@@ -324,6 +455,7 @@ fn signal(signal: Signal) {
         Signal::ShellCloaked => 2,
         Signal::Uncloaked => 3,
         Signal::OtherForeground => 4,
+        Signal::Observe => 5,
     };
     let thread = OBSERVER_THREAD.load(Ordering::SeqCst);
     if thread != 0 {
@@ -369,8 +501,11 @@ unsafe extern "system" fn win_event_proc(
             // Admit one delayed observation; the owner only repairs an unhealthy
             // window or one below the independently validated desktop surface.
             signal(Signal::DesktopForeground);
-        } else if !staging_window(window) {
+        } else if staging_window(window) {
+            signal(Signal::Observe);
+        } else {
             cancel();
+            signal(Signal::Observe);
         }
     } else if window == observed {
         if event == EVENT_SYSTEM_MINIMIZESTART {
@@ -385,6 +520,15 @@ unsafe extern "system" fn win_event_proc(
                 signal(Signal::ShellCloaked);
             }
         }
+    } else if event == EVENT_SYSTEM_MINIMIZESTART
+        && object == 0
+        && child == 0
+        && !window.is_null()
+    {
+        // Win+D minimizes every application window and can lower the list below
+        // the desktop with no foreground event reaching this hook. The minimize of
+        // another window is only a trigger for one restricted observation.
+        signal(Signal::Observe);
     }
 }
 pub(crate) fn watch<F>(handler: F) -> Option<JoinHandle<()>>
@@ -488,9 +632,13 @@ fn run_message_loop(
                         1 => Signal::Minimized,
                         2 => Signal::ShellCloaked,
                         3 => Signal::Uncloaked,
+                        5 => Signal::Observe,
                         _ => Signal::OtherForeground,
                     };
                     recovery.signal(kind, generation)
+                }
+                SIGNAL_MESSAGE => {
+                    Effect::None
                 }
                 CANCEL_MESSAGE if message.wParam as u64 == generation => {
                     recovery.cancel(generation)

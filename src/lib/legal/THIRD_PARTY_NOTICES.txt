@@ -38,7 +38,7 @@ Notes on specific components
   nsis_tauri_utils.dll comes from github.com/tauri-apps/nsis-tauri-utils; its MIT text is
   retained separately below. The NSIS LZMA component retains CPL-1.0 with its linking
   exception; WiX components retain MS-RL. The application MIT license does not replace them.
-  The accompanying CalendarTODO-installer-sources-0.1.1.zip contains the exact NSIS 3.11,
+  The accompanying CalendarTODO-installer-sources-0.1.2.zip contains the exact NSIS 3.11,
   WiX 3.14.1 and nsis-tauri-utils 0.5.3 source snapshots, their licenses, generated installer
   inputs with machine paths normalized, and a component correspondence record. Obtain it
   alongside the installer from the same distribution location, at no additional charge.
@@ -52,7 +52,7 @@ Microsoft Edge WebView2
 ------------------------
 The application displays its interface using the Microsoft Edge WebView2 Runtime, which is a
 Microsoft component installed and serviced separately from this application. This distribution
-does not bundle the WebView2 Runtime or its bootstrapper. The v0.1.1 NSIS and MSI installers
+does not bundle the WebView2 Runtime or its bootstrapper. The v0.1.2 NSIS and MSI installers
 skip Runtime installation: they do not download or execute a Microsoft Runtime installer.
 The Runtime must already be installed for the application interface to work. If it is missing,
 use Microsoft's official page and follow Microsoft's Runtime installation instructions:
@@ -14030,7 +14030,7 @@ https://developer.microsoft.com/microsoft-edge/api/eula/webview2?locale=en-us
 The separate consumer terms are served with &consumer=true. These are Runtime
 terms, separate from the SDK loader's BSD license. The developer terms include
 distribution conditions and required SmartScreen end-user notices. Attaching
-third-party notices does not establish acceptance of those terms. For v0.1.1 both Windows
+third-party notices does not establish acceptance of those terms. For v0.1.2 both Windows
 installers use skip mode and do not download or install the Runtime. Missing-Runtime users
 must follow Microsoft's official installation process and review the terms it presents.
 This change does not settle separate MSVC/Windows SDK redistribution conditions.

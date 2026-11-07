@@ -4,6 +4,7 @@
   import { searchRemoteStart, searchRemoteStep, searchRemoteCancel, type RangeView, searchWorkspacePage, searchWorkspacePreferences, type SearchSummary, type SearchPreferences, type SearchField, type SearchCursor, type SearchDirection } from "$lib/ipc/search-workspace";
   let { language, active, excludedResources = [], dataRevision = 0, select, failure }: { language: ResolvedLanguage; active: boolean; excludedResources?: string[]; dataRevision?: unknown; select: (item: SearchSummary) => void; failure: (error: unknown) => void } = $props();
   let text = $state("");
+  const keywordSearch = $derived(text.trim().length > 0);
   let preferences = $state<SearchPreferences>({ fields: ["title"], includeCompleted: true });
   let ready = $state(false);
   let initialized = false;
@@ -78,7 +79,7 @@
     void savePreferences();
   }
   async function reset(direction: SearchDirection = "after") {
-    generation++; mode = direction; anchor = Date.now(); anchorKey = null; before = null; after = null; pageTemplate = null; locateLatestPast = false; hasBefore = direction !== "noTime"; hasAfter = true; rows = []; focusIndex = 0; scrollTop = 0;
+    generation++; mode = direction; anchor = Date.now(); anchorKey = null; before = null; after = null; pageTemplate = null; locateLatestPast = false; hasBefore = !keywordSearch && direction !== "noTime"; hasAfter = true; rows = []; focusIndex = 0; scrollTop = 0;
     if (view) view.scrollTop = 0;
     if (busy) { resetPending = true; return; }
     await load(direction, true);
@@ -115,14 +116,14 @@
       }
       if (direction === "before") { before = result.continuation; hasBefore = !result.exhausted; }
       else { after = result.continuation; hasAfter = !result.exhausted; }
-      if (replace) { before = boundary(rows[0],"before",result); hasBefore = mode !== "noTime"; }
+      if (replace) { before = boundary(rows[0],"before",result); hasBefore = mode !== "noTime" && (!keywordSearch || anchorKey !== null); }
       await tick();
       if (view && !replace && first) {
         const index = visibleRows.findIndex(row => row.key === first.key);
         if (index >= 0) { view.scrollTop = index * height + offset; scrollTop = view.scrollTop; }
       }
       if (direction === "before" && locateLatestPast && rows.length) { if (view) { view.scrollTop = Math.max(0,view.scrollHeight - view.clientHeight); scrollTop = view.scrollTop; } locateLatestPast = false; }
-      if (replace && !rows.length && result.exhausted && direction === "after") { hasBefore = true; locateLatestPast = true; continueDirection = "before"; }
+      if (replace && !keywordSearch && !rows.length && result.exhausted && direction === "after") { hasBefore = true; locateLatestPast = true; continueDirection = "before"; }
       else if (!result.exhausted && (result.items.length < 25 || (view && view.clientHeight > 0 && view.scrollHeight <= view.clientHeight))) continueDirection = direction;
     } catch(error) { if (epoch === generation) { failed = true; failure(error); } }
     finally {
@@ -160,20 +161,74 @@
       <label class="sr-only" for="workspace-search">{translate(language,"searchItems")}</label>
       <input bind:this={input} id="workspace-search" type="search" bind:value={text} placeholder={translate(language,"searchItems")} oncompositionstart={() => composing = true} oncompositionend={() => composing = false} onkeydown={event => { if (event.key === "Escape" && !composing) { event.stopPropagation(); if (text) text = ""; else view?.focus(); } if (event.key === "Enter" && !composing && visibleRows[0]) select(visibleRows[0]); }} />
     </div>
-    <div class="search-options"><label><input type="checkbox" bind:checked={preferences.includeCompleted} onchange={savePreferences} />{translate(language,"searchIncludeCompleted")}</label><button type="button" onclick={() => void reset()}>{translate(language,"searchNow")}</button><button type="button" onclick={() => void reset("noTime")}>{translate(language,"searchNoTime")}</button>{#if hasBefore && mode !== "noTime"}<button type="button" disabled={busy} onclick={() => void load("before")}>{translate(language,"searchEarlier")}</button>{/if}</div>
-    <div class="remote-controls"><button type="button" onclick={() => rangeOpen = !rangeOpen}>{translate(language,"searchMoreIcloud")}</button>{#if remote?.state === "reading"}<span role="status">{remote.completed} / {remote.total}</span><button type="button" onclick={() => { remoteGeneration++; void searchRemoteCancel().catch(failure); if(remote)remote={...remote,state:"cancelled"}; }}>{translate(language,"searchStop")}</button>{/if}</div>
-    {#if rangeOpen}<div class="range-options"><button type="button" onclick={() => preset(false)}>{translate(language,"searchPastYear")}</button><button type="button" onclick={() => preset(true)}>{translate(language,"searchFutureYear")}</button><label>{translate(language,"start")}<input type="date" bind:value={rangeStart} /></label><label>{translate(language,"due")}<input type="date" bind:value={rangeEnd} /></label><button type="button" disabled={remote?.state === "reading" || !rangeStart || !rangeEnd || rangeEnd <= rangeStart} onclick={() => void extend()}>{translate(language,"searchRangeStart")}</button></div>{/if}
+    <div class="search-toolbar">
+      <div class="search-options">
+        <label><input type="checkbox" bind:checked={preferences.includeCompleted} onchange={savePreferences} />{translate(language,"searchIncludeCompleted")}</label>
+        {#if !keywordSearch}
+          <button type="button" onclick={() => void reset()}>{translate(language,"searchNow")}</button>
+          <button type="button" aria-pressed={mode === "noTime"} onclick={() => void reset("noTime")}>{translate(language,"searchNoTime")}</button>
+        {/if}
+        {#if hasBefore && mode !== "noTime"}<button type="button" disabled={busy} onclick={() => void load("before")}>{translate(language,"searchEarlier")}</button>{/if}
+      </div>
+      <div class="remote-controls"><button type="button" aria-expanded={rangeOpen} aria-controls="search-range" onclick={() => rangeOpen = !rangeOpen}>{translate(language,"searchMoreIcloud")}</button>{#if remote?.state === "reading"}<span role="status">{remote.completed} / {remote.total}</span><button type="button" onclick={() => { remoteGeneration++; void searchRemoteCancel().catch(failure); if(remote)remote={...remote,state:"cancelled"}; }}>{translate(language,"searchStop")}</button>{/if}</div>
+    </div>
+    {#if rangeOpen}<div class="range-options" id="search-range"><button type="button" onclick={() => preset(false)}>{translate(language,"searchPastYear")}</button><button type="button" onclick={() => preset(true)}>{translate(language,"searchFutureYear")}</button><label>{translate(language,"start")}<input type="date" bind:value={rangeStart} /></label><label>{translate(language,"due")}<input type="date" bind:value={rangeEnd} /></label><button type="button" disabled={remote?.state === "reading" || !rangeStart || !rangeEnd || rangeEnd <= rangeStart} onclick={() => void extend()}>{translate(language,"searchRangeStart")}</button></div>{/if}
     {#if remote}<p class="range-state" role="status">{new Date(remote.range.startAtUtcMs).toLocaleDateString(language)} – {new Date(remote.range.endAtUtcMs).toLocaleDateString(language)} · {translate(language,remote.state === "complete" ? "searchRangeComplete" : remote.state === "cancelled" ? "searchStopped" : remote.state === "failed" ? "searchFailed" : remote.state === "partialCapacity" ? "searchRangePartial" : "searchReading")}{#if remote.unsupported} · {translate(language,"searchUnsupported")}{/if}</p>{/if}
   </div>
   <div class="search-list" bind:this={view} bind:clientHeight={viewportHeight} onscroll={scroll} onkeydown={key} tabindex="0" role="grid" aria-label={translate(language,"searchWorkspace")} aria-busy={busy}>
     <div style:height={`${start * height}px`} aria-hidden="true"></div>
-    {#each windowRows as row, index (row.key)}<div class="search-row" role="row" class:completed={row.completed} class:keyboard-selected={focusIndex === start + index}><button type="button" role="gridcell" onclick={() => { focusIndex = start + index; select(row); }}><strong>{row.title}</strong><span><i style:background={row.calendarColor ?? "var(--color-text-muted)"}></i>{row.calendarName}<time>{date(row)}</time>{#if row.completed}<em>{translate(language,"completed")}</em>{/if}</span></button></div>{/each}
+    {#each windowRows as row, index (row.key)}
+      <div class="search-row" role="row" class:completed={row.completed} class:keyboard-selected={focusIndex === start + index}>
+        <button type="button" role="gridcell" onclick={() => { focusIndex = start + index; select(row); }}>
+          <strong>{row.title}</strong>
+          <span class="result-metadata"><span class="result-calendar"><i aria-hidden="true" style:background={row.calendarColor ?? "var(--color-text-muted)"}></i><span>{row.calendarName}</span></span><time>{date(row)}</time>{#if row.completed}<em>{translate(language,"completed")}</em>{/if}</span>
+        </button>
+      </div>
+    {/each}
     <div style:height={`${Math.max(0,visibleRows.length - end) * height}px`} aria-hidden="true"></div>
-    {#if failed}<p role="alert">{translate(language,"searchFailed")} <button type="button" onclick={() => void load(mode)}>{translate(language,"searchRetry")}</button></p>{:else if busy}<p class="edge" role="status">{translate(language,"searchReading")}</p>{:else if !visibleRows.length}<p class="edge">{translate(language,"searchEmpty")}</p>{/if}
-    {#if hasAfter}<button class="edge" type="button" disabled={busy} onclick={() => void load(mode === "noTime" ? "noTime" : "after")}>{translate(language,"searchLater")}</button>{/if}
+    {#if failed}<p role="alert">{translate(language,"searchFailed")} <button type="button" onclick={() => void refresh()}>{translate(language,"searchRetry")}</button></p>{:else if busy}<p class="edge" role="status">{translate(language,"searchReading")}</p>{:else if !visibleRows.length}<p class="edge">{translate(language,"searchEmpty")}</p>{/if}
+    {#if hasAfter}<button class="edge" type="button" disabled={busy} onclick={() => void load(mode === "noTime" ? "noTime" : "after")}>{translate(language,keywordSearch ? "searchMoreResults" : "searchLater")}</button>{/if}
   </div>
 </section>
 <style>
-  .remote-controls,.range-options{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px}.remote-controls button,.range-options button{background:transparent;color:var(--color-text-muted);border:0;min-height:36px}.range-options label{display:flex;align-items:center;gap:6px}.range-state{font-size:13px;color:var(--color-text-muted)}
-  .search-workspace{display:flex;flex-direction:column;min-width:0;min-height:0;height:100%;padding:0 24px}.search-workspace[hidden]{display:none}.search-tools{flex:none;padding-bottom:12px}.search-field{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:8px}.search-field>input{min-width:0;height:44px;border:0;border-radius:10px;padding:0 12px;color:var(--color-text);background:var(--color-search-input-surface)}.search-field>input:focus-visible{outline:0;box-shadow:inset 0 -2px var(--color-focus)}.search-field details{position:relative}.search-field summary{padding:10px 12px;height:44px;white-space:nowrap;cursor:pointer;border-radius:10px;background:var(--color-search-scope-surface)}.field-menu{position:absolute;left:0;top:100%;z-index:20;background:var(--color-surface-raised);box-shadow:var(--shadow-menu);padding:8px;border-radius:8px;min-width:140px}.field-menu label{display:flex;gap:8px;align-items:center;min-height:36px}.search-options{display:flex;align-items:center;gap:12px;flex-wrap:wrap;color:var(--color-text-muted);font-size:13px;margin-top:8px}.search-options label{display:flex;gap:6px;align-items:center;margin-bottom:0;cursor:pointer}.search-options label,.search-options button{height:36px;min-height:36px;padding:0 10px;border:0;border-radius:8px;background:var(--color-search-option-surface);color:var(--color-text-muted)}.search-options input,.field-menu input{width:18px;height:18px;margin:0;accent-color:var(--color-primary)}.search-options button:hover,.search-options label:hover,.search-field summary:hover{background:var(--color-field-selected)}.edge{background:transparent;color:var(--color-text-muted);border:0;min-height:36px}.search-list{overflow:auto;overflow-anchor:none;min-height:0;flex:1}.search-row{height:76px;box-sizing:border-box}.search-row button{display:flex;flex-direction:column;justify-content:center;gap:8px;text-align:left;width:100%;height:100%;padding:10px 12px;background:transparent;color:var(--color-text);border:0;border-radius:8px}.search-row button:hover,.keyboard-selected button{background:var(--color-surface-soft)}.search-row strong{font-weight:500;max-width:100%;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.search-row span{display:flex;align-items:center;gap:8px;color:var(--color-text-muted);font-size:13px;white-space:nowrap;max-width:100%;overflow:hidden}.search-row i{width:7px;height:7px;border-radius:50%;flex:none}.search-row time{font-variant-numeric:tabular-nums}.search-row em{font-style:normal}.completed strong{text-decoration:line-through;color:var(--color-text-muted)}.edge{display:block;text-align:center;width:100%;font-size:13px}button:focus-visible,summary:focus-visible{outline:2px solid var(--color-focus);outline-offset:-2px}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+  .search-workspace{display:flex;flex-direction:column;min-width:0;min-height:0;height:100%;padding:0 24px}
+  .search-workspace[hidden]{display:none}
+  .search-tools{flex:none;padding-bottom:16px}
+  .search-field{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:8px}
+  .search-field>input{min-width:0;height:44px;border:0;border-radius:10px;padding:0 12px;color:var(--color-text);background:var(--color-search-input-surface)}
+  .search-field>input:focus-visible{outline:0;box-shadow:inset 0 -2px var(--color-focus)}
+  .search-field details{position:relative}
+  .search-field summary{padding:10px 12px;height:44px;white-space:nowrap;cursor:pointer;border-radius:10px;background:var(--color-search-scope-surface)}
+  .field-menu{position:absolute;left:0;top:calc(100% + 4px);z-index:20;background:var(--color-surface-raised);box-shadow:var(--shadow-menu);padding:8px;border-radius:8px;min-width:160px}
+  .field-menu label{display:flex;gap:8px;align-items:center;min-height:36px;padding:0 8px;margin:0;cursor:pointer;border-radius:8px}
+  .field-menu label:hover{background:var(--color-surface-soft)}
+  .search-toolbar{display:flex;align-items:center;justify-content:space-between;gap:8px 16px;flex-wrap:wrap;margin-top:8px}
+  .search-options,.remote-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap;color:var(--color-text-muted);font-size:13px}
+  .remote-controls{margin-left:auto}
+  .search-options label{display:flex;gap:8px;align-items:center;margin:0;cursor:pointer}
+  .search-options label,.search-options button{min-height:36px;padding:0 12px;border:0;border-radius:8px;background:var(--color-search-option-surface);color:var(--color-text-muted)}
+  .search-options input,.field-menu input{width:18px;height:18px;margin:0;accent-color:var(--color-primary);flex:none}
+  .search-options button:hover,.search-options label:hover,.search-field summary:hover,.search-options button[aria-pressed="true"]{background:var(--color-field-selected)}
+  .remote-controls button,.range-options button{background:transparent;color:var(--color-text-muted);border:0;border-radius:8px;min-height:36px;padding:0 12px;font-size:13px}
+  .remote-controls button:hover,.remote-controls button[aria-expanded="true"],.range-options button:hover{background:var(--color-surface-soft);color:var(--color-text)}
+  .range-options{display:flex;align-items:center;gap:8px 12px;flex-wrap:wrap;margin-top:12px}
+  .range-options label{display:flex;align-items:center;gap:8px;margin:0;font-size:13px;color:var(--color-text-muted)}
+  .range-options input{min-width:0;min-height:36px;max-width:100%;border:0;border-radius:8px;padding:4px 8px;background:var(--color-search-option-surface);color:var(--color-text)}
+  .range-state{font-size:13px;color:var(--color-text-muted);margin:8px 0 0}
+  .search-list{overflow:auto;overflow-anchor:none;min-height:0;flex:1}
+  .search-row{height:76px;box-sizing:border-box}
+  .search-row button{display:flex;flex-direction:column;justify-content:center;gap:8px;text-align:left;width:100%;height:100%;padding:12px;background:transparent;color:var(--color-text);border:0;border-radius:10px}
+  .search-row button:hover,.keyboard-selected button{background:var(--color-surface-soft)}
+  .search-row strong{font-size:15px;font-weight:600;line-height:1.4;max-width:100%;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+  .result-metadata{display:flex;align-items:center;gap:12px;width:100%;min-width:0;color:var(--color-text-muted);font-size:13px;line-height:1.4;white-space:nowrap}
+  .result-calendar{display:flex;align-items:center;gap:8px;min-width:0;flex:1}
+  .result-calendar span{overflow:hidden;text-overflow:ellipsis}
+  .result-calendar i{width:7px;height:7px;border-radius:50%;flex:none}
+  .result-metadata time{font-variant-numeric:tabular-nums;flex:none}
+  .result-metadata em{font-style:normal;flex:none}
+  .completed strong{text-decoration:line-through;color:var(--color-text-muted)}
+  .edge{display:block;text-align:center;width:100%;font-size:13px;background:transparent;color:var(--color-text-muted);border:0;min-height:36px}
+  button:focus-visible,summary:focus-visible{outline:2px solid var(--color-focus);outline-offset:-2px}
+  .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+  @media(max-width:600px){.search-workspace{padding:0 16px}.result-metadata{gap:8px}.result-metadata em{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}}
 </style>

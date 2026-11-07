@@ -40,8 +40,8 @@ Calendar TODO 是一个面向 Windows 的日程与待办工具。既能接入 iC
 - **Windows 桌面清单**：独立的紧凑视图，支持折叠、背景不透明度调整和托盘快捷操作。
 - **iCloud 日历**：选择需要显示与同步的日历；开启远程编辑后，可创建、修改和删除符合条件的日程。同步冲突时可以保留远端版本；被阻止的本地修改不会直接覆盖远端，只能作为后续版本重试。
 - **通知与外观**：应用运行时提供 Windows 到期提醒，支持中英文界面、两套配色以及浅色、深色和跟随系统模式。
-- **日程搜索**：查找本地事项和已缓存的 iCloud 日程，搜索范围包括日程标题、地点、备注等。
-- **顺手的日常操作**：拖动调整顺序、标记完成；日程事项编辑后自动保存。
+- **日程搜索**：在设为显示的日历中查找已缓存的过去、未来及无时间事项，可选择标题、地点、备注和本地标签字段。未缓存的 iCloud 日程需主动读取指定时间范围；重复事项限已生成或已读取的实例。
+- **顺手的日常操作**：拖动调整顺序、标记完成；日程事项编辑后自动保存。有效新建提交后关闭弹窗，并在主窗口和桌面清单显示只读临时项；保存失败时可恢复本次草稿。两窗口共享创建和删除状态，日历显示选择会在退出后保留。
 - **本地日历删除**：可删除本地日历及其事项。
 
 ## 下载与安装
@@ -53,7 +53,7 @@ Calendar TODO 是一个面向 Windows 的日程与待办工具。既能接入 iC
 | 安装包 | 用途 |
 |---|---|
 | NSIS：`Calendar TODO_<版本>_x64-setup.exe` | 日常安装优先选择 |
-| MSI：`Calendar TODO_<版本>_x64_en-US.msi` | 可选的 Windows Installer 安装包，以发布页为准 |
+| MSI：`Calendar TODO_<版本>_x64_en-US.msi` / `Calendar TODO_<版本>_x64_zh-CN.msi` | 英文 / 简体中文 Windows Installer 安装包，以发布页为准 |
 
 1. 下载一种安装包，并按同一版本的 `SHA256SUMS.txt` 核对 SHA-256。
 2. 确认 WebView2 Runtime 已安装，再运行 Calendar TODO 安装包。
@@ -97,14 +97,14 @@ Calendar TODO 是一个面向 Windows 的日程与待办工具。既能接入 iC
 
 技术栈：TAURI® 2、Rust、Svelte 与 SQLite。
 
-准备 Windows x64 开发环境：Node.js 22.12+ 与 npm、支持 Rust 2024 edition 的 MSVC 工具链、Visual Studio 2022 的 C++ 桌面开发工具及 Windows SDK，以及 CMake。运行应用还需要 WebView2 Runtime。
+准备 Windows x64 开发环境：Node.js 22.12+ 与 npm、支持 Rust 2024 edition 的 MSVC 工具链、Visual Studio 2022 Community 的 C++ 桌面开发工具及 Windows SDK，以及 CMake。运行应用还需要 WebView2 Runtime。
 
 将源码放在较短的路径中，例如 `D:\src\CalendarTODO`，以避免原生依赖的 Windows 路径长度问题。在已加载 MSVC 和 Windows SDK 环境的 Visual Studio 开发者终端中，进入仓库根目录执行：
 
 ```powershell
 npm ci --include=dev
 npm run check
-npm run tauri -- build --target x86_64-pc-windows-msvc --bundles nsis,msi
+npm run tauri -- build --target x86_64-pc-windows-msvc --bundles nsis,msi -- --locked
 ```
 
 Tauri 会先构建前端，再构建应用和安装包。默认产物位于 `src-tauri/target/x86_64-pc-windows-msvc/release/bundle/`；配置了 `CARGO_TARGET_DIR` 时，以该目录为准。构建和打包可能下载公开依赖及安装器工具，不需要真实账户、凭据、用户数据库或私人配置。

@@ -39,6 +39,10 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, State};
 
+use uuid::Uuid;
+#[path = "ipc/agenda_presentation.rs"]
+mod presented;
+
 pub const LOCAL_TODO_CHANGED_EVENT: &str = "calendar-todo://local-todo-changed";
 
 #[tauri::command]
@@ -373,6 +377,7 @@ pub(crate) fn restore_desktop_window_state(
 }
 
 pub struct AppState {
+    agenda_presentation: crate::application::agenda_presentation::AgendaPresentationState,
     calendar_display_selection:
         crate::application::calendar_display_selection::CalendarDisplaySelectionState,
     remote_search: crate::application::remote_search::RemoteSearch,
@@ -438,6 +443,44 @@ impl AppState {
             .install_scoped_emitter(emitter)
     }
 }
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ConfirmedEventError {
+    #[serde(flatten)]
+    error: IpcError,
+    stage: &'static str,
+    reason: &'static str,
+}
+impl ConfirmedEventError {
+    fn flow(stage: &'static str, error: IpcError) -> Self {
+        Self { reason: error.code, error, stage }
+    }
+    fn persistence(stage: &'static str, error: crate::adapters::persistence::PersistenceError) -> Self {
+        use crate::adapters::persistence::PersistenceError as P;
+        use crate::domain::remote_mutation::RemoteMutationError as M;
+        let reason = match &error {
+            P::RemoteMutation(M::UnsafeCalendarData) => "unsafeCalendarData",
+            P::RemoteMutation(M::CorruptStoredValue) => "corruptStoredValue",
+            P::RemoteMutation(M::InvalidIdentity) => "invalidIdentity",
+            P::RemoteMutation(M::InvalidTitle) => "invalidTitle",
+            P::RemoteMutation(M::InvalidDescription) => "invalidDescription",
+            P::StaleSyncCapture => "staleCapture",
+            P::RemoteMutationReadOnly => "readOnly",
+            P::PendingMutationExists => "pendingMutation",
+            P::IdempotencyConflict => "idempotencyConflict",
+            P::IdentityConflict => "identityConflict",
+            P::AccountDisabled => "accountDisabled",
+            P::NotFound => "notFound",
+            P::ActorUnavailable => "actorUnavailable",
+            P::Sqlite(_) => "sqlite",
+            P::Clock => "clock",
+            P::RemoteAccountConnectionRequired => "connectionRequired",
+            _ => "persistenceUnavailable",
+        };
+        Self { error: confirmed_target_selection_error(error), stage, reason }
+    }
+}
+
 struct ConfirmedEventContinuation {
     remote_crud: crate::application::remote_crud::RemoteCrudApplication,
     remote_execution:
@@ -455,20 +498,20 @@ impl ConfirmedEventContinuation {
     fn run(
         &self,
         input: &str,
-    ) -> Result<crate::application::remote_crud::ConfirmedEventView, IpcError> {
+    ) -> Result<crate::application::remote_crud::ConfirmedEventView, ConfirmedEventError> {
         confirmed_flow(
             || {
                 self.remote_crud
                     .confirmed_target(input)
                     .map_err(|e| match e {
                         crate::application::remote_crud::RemoteCrudError::InvalidInput => {
-                            IpcError {
+                            ConfirmedEventError::flow("select", IpcError {
                                 code: "validation",
                                 message: "确认的事件请求无效，草稿仍保留。",
-                            }
+                            })
                         }
-                        crate::application::remote_crud::RemoteCrudError::Persistence(e) => {
-                            MutationApplicationError::Persistence(e).into()
+                        crate::application::remote_crud::RemoteCrudError::Persistence(error) => {
+                            ConfirmedEventError::persistence("select", error)
                         }
                     })
             },
@@ -476,17 +519,17 @@ impl ConfirmedEventContinuation {
                 let execution = self
                     .remote_execution
                     .as_ref()
-                    .ok_or_else(remote_account_connection_required)?;
+                    .ok_or_else(|| ConfirmedEventError::flow("connect", remote_account_connection_required()))?;
                 let (account, route) = target.account_and_route();
                 execution
                     .ensure_confirmed_connection(account, route)
-                    .map_err(|e| match e {
+                    .map_err(|e| ConfirmedEventError::flow("connect", match e {
                         AccountProfileServiceError::Unavailable => IpcError {
                             code: "remoteConnectionUnavailable",
                             message: "连接未完成，未保存远程操作；草稿仍保留。",
                         },
                         other => other.into(),
-                    })
+                    }))
             },
             |target, connection| {
                 if target.is_successor() {
@@ -495,10 +538,10 @@ impl ConfirmedEventContinuation {
                 self.sync_runtime
                     .confirmed_read_sync(target.account_and_route().0, connection.generation())
                     .map(Some)
-                    .map_err(|_| IpcError {
+                    .map_err(|_| ConfirmedEventError::flow("sync", IpcError {
                         code: "remoteSyncUnavailable",
                         message: "同步未完成，未保存远程操作；草稿仍保留。",
-                    })
+                    }))
             },
             |ready| {
                 let preflight = ready.map(|(target, connection, read)| {
@@ -508,29 +551,28 @@ impl ConfirmedEventContinuation {
                     (target, current)
                 });
                 self.remote_crud
-            .confirmed_json_guarded(input, self.remote_execution.as_deref(), preflight)
-            .map_err(|error| match error {
-                crate::application::remote_crud::RemoteCrudError::InvalidInput => IpcError {
-                    code: "validation",
-                    message: "确认的事件请求或当前操作范围无效。",
-                },
-                crate::application::remote_crud::RemoteCrudError::Persistence(error) => {
-                    if matches!(error, crate::adapters::persistence::PersistenceError::StaleSyncCapture) {
-                        return IpcError { code: "remoteTargetChanged", message: "同步后事件或日历已改变；未保存操作，草稿仍保留，请刷新后重新确认。" };
-                    }
-                    MutationApplicationError::Persistence(error).into()
-                }
-            })
+                    .confirmed_json_guarded(input, self.remote_execution.as_deref(), preflight)
+                    .map_err(|error| match error {
+                        crate::application::remote_crud::RemoteCrudError::InvalidInput => {
+                            ConfirmedEventError::flow("admit", IpcError {
+                                code: "validation",
+                                message: "确认的事件请求或当前操作范围无效。",
+                            })
+                        }
+                        crate::application::remote_crud::RemoteCrudError::Persistence(error) => {
+                            ConfirmedEventError::persistence("admit", error)
+                        }
+                    })
             },
         )
     }
 }
-fn confirmed_flow<T, C, R, V>(
-    select: impl FnOnce() -> Result<Option<T>, IpcError>,
-    connect: impl FnOnce(&T) -> Result<C, IpcError>,
-    sync: impl FnOnce(&T, &C) -> Result<R, IpcError>,
-    admit: impl FnOnce(Option<(T, C, R)>) -> Result<V, IpcError>,
-) -> Result<V, IpcError> {
+fn confirmed_flow<T, C, R, V, E>(
+    select: impl FnOnce() -> Result<Option<T>, E>,
+    connect: impl FnOnce(&T) -> Result<C, E>,
+    sync: impl FnOnce(&T, &C) -> Result<R, E>,
+    admit: impl FnOnce(Option<(T, C, R)>) -> Result<V, E>,
+) -> Result<V, E> {
     let ready = match select()? {
         Some(target) => {
             let connection = connect(&target)?;
@@ -554,6 +596,7 @@ impl AppState {
 
     pub fn new(parts: AppStateParts) -> Self {
         Self {
+            agenda_presentation: Default::default(),
             calendar_display_selection: Default::default(),
             remote_search: crate::application::remote_search::RemoteSearch::default(),
             remote_execution: None,
@@ -1375,6 +1418,31 @@ fn remote_account_connection_required() -> IpcError {
         message: "请先连接 iCloud 账户，再修改远程日历。",
     }
 }
+fn confirmed_target_selection_error(
+    error: crate::adapters::persistence::PersistenceError,
+) -> IpcError {
+    if matches!(
+        error,
+        crate::adapters::persistence::PersistenceError::StaleSyncCapture
+    ) {
+        IpcError {
+            code: "remoteTargetChanged",
+            message: "同步后事件或日历已改变；未保存操作，草稿仍保留，请刷新后重新确认。",
+        }
+    } else if matches!(
+        error,
+        crate::adapters::persistence::PersistenceError::RemoteMutation(
+            crate::domain::remote_mutation::RemoteMutationError::UnsafeCalendarData
+        )
+    ) {
+        IpcError {
+            code: "remoteEventReadOnly",
+            message: "此事件的当前服务器内容不支持安全编辑。",
+        }
+    } else {
+        MutationApplicationError::Persistence(error).into()
+    }
+}
 
 pub(crate) const CONFIRMED_EVENT_STATE_EVENT: &str = "calendar-todo://confirmed-event-state";
 pub(crate) struct ConfirmedEventEmitter(pub AppHandle);
@@ -1387,27 +1455,47 @@ impl crate::application::remote_mutation_runtime::MutationStateEmitter for Confi
         if let Some(state) = self.0.try_state::<AppState>() {
             state.trigger_remote_recurrence_terminal();
         }
+        let presentation_view = crate::application::remote_crud::ConfirmedEventView::from_runtime(view);
+        presented::remote_changed(&self.0, &presentation_view);
         let _ = self.0.emit(
             CONFIRMED_EVENT_STATE_EVENT,
-            crate::application::remote_crud::ConfirmedEventView::from_runtime(view),
+            presentation_view,
         );
         let _ = self.0.emit("calendar-todo://agenda-data-changed", ());
     }
 }
 #[tauri::command]
+pub fn get_agenda_presentation(state: State<'_, AppState>) -> crate::application::agenda_presentation::Snapshot { state.agenda_presentation.get() }
+#[tauri::command]
+pub fn begin_presented_create(app: AppHandle, window: tauri::WebviewWindow, state: State<'_, AppState>, input: crate::application::agenda_presentation::BeginCreate) -> Result<crate::application::agenda_presentation::Snapshot, IpcError> { presented::begin(app, &state, window.label().to_string(), input) }
+#[tauri::command]
+pub fn observe_presented_creates(app: AppHandle, window: tauri::WebviewWindow, state: State<'_, AppState>, identities: Vec<crate::application::agenda_presentation::Recovery>) -> crate::application::agenda_presentation::Snapshot { presented::observe(&app, &state, window.label(), &identities) }
+#[tauri::command]
+pub fn stage_presented_remote_delete(app: AppHandle, window: tauri::WebviewWindow, state: State<'_, AppState>, resource_id: String) -> Result<crate::application::agenda_presentation::Snapshot, IpcError> { presented::stage_delete(&app, &state, window.label().to_string(), resource_id) }
+#[tauri::command]
+pub fn undo_presented_remote_delete(app: AppHandle, state: State<'_, AppState>, deletion_id: String) -> Result<crate::application::agenda_presentation::Snapshot, IpcError> {
+    let snapshot = state.agenda_presentation.undo_delete(&deletion_id, state.clock.now_utc_ms().map_err(|_| presented::unavailable())?); presented::publish(&app); Ok(snapshot)
+}
+#[tauri::command]
+pub fn expire_presented_remote_delete(app: AppHandle, state: State<'_, AppState>, deletion_id: String) -> Result<crate::application::agenda_presentation::DeleteExpiry, IpcError> { presented::expire(app, &state, deletion_id) }
+#[tauri::command]
+pub fn retry_presented_create_metadata(app: AppHandle, state: State<'_, AppState>, identity: crate::application::agenda_presentation::Recovery) -> Result<crate::application::agenda_presentation::Snapshot, IpcError> { presented::retry_metadata(&app, &state, identity) }
+
+#[tauri::command]
 pub(crate) async fn confirmed_remote_event(
     app: AppHandle,
     state: State<'_, AppState>,
     input: String,
-) -> Result<crate::application::remote_crud::ConfirmedEventView, IpcError> {
+) -> Result<crate::application::remote_crud::ConfirmedEventView, ConfirmedEventError> {
     let continuation = ConfirmedEventContinuation::capture(&state);
     let result = tauri::async_runtime::spawn_blocking(move || continuation.run(&input))
         .await
-        .map_err(|_| IpcError {
+        .map_err(|_| ConfirmedEventError::flow("continuation", IpcError {
             code: "remoteConnectionUnavailable",
             message: "连接流程未完成，草稿仍保留。",
-        })?;
-    if result.is_ok() {
+        }))?;
+    if let Ok(view) = &result {
+        presented::remote_changed(&app, view);
         let _ = app.emit("calendar-todo://agenda-data-changed", ());
     }
     result
@@ -1499,7 +1587,7 @@ pub async fn queue_confirmed_remote_event_delete(
     let continuation = ConfirmedEventContinuation::capture(&state);
     let mutations = state.remote_mutations.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let view = continuation.run(&raw)?;
+        let view = continuation.run(&raw).map_err(|error| error.error)?;
         mutations.view(&view.receipt.account_id).map_err(Into::into)
     })
     .await
@@ -1778,8 +1866,10 @@ pub fn delete_local_todo(
     state: State<'_, AppState>,
     todo_id: String,
 ) -> Result<(), IpcError> {
-    let result = state.local_todos.delete(todo_id).map_err(Into::into);
+    let result = state.local_todos.delete(todo_id.clone()).map_err(Into::into);
     if result.is_ok() {
+        state.agenda_presentation.retire_local_deleted(&todo_id, None);
+        presented::publish(&app);
         let _ = state.refresh_reminders();
         let _ = app.emit(LOCAL_TODO_CHANGED_EVENT, ());
     }
@@ -1795,9 +1885,11 @@ pub fn delete_local_todo_occurrence(
 ) -> Result<(), IpcError> {
     let result = state
         .local_todos
-        .delete_occurrence(todo_id, occurrence_key)
+        .delete_occurrence(todo_id.clone(), occurrence_key.clone())
         .map_err(Into::into);
     if result.is_ok() {
+        state.agenda_presentation.retire_local_deleted(&todo_id, Some(&occurrence_key));
+        presented::publish(&app);
         let _ = state.refresh_reminders();
         let _ = app.emit(LOCAL_TODO_CHANGED_EVENT, ());
     }

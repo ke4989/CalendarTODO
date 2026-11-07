@@ -76,6 +76,23 @@ impl WorkspaceQuery {
             include_completed: self.preferences.include_completed,
         })
     }
+    /// Keywords start across the full cached timeline; an explicit identity
+    /// anchor still pins a viewport refresh, and cursors take precedence.
+    pub fn initial_time(&self) -> i64 {
+        if self.direction == SearchDirection::NoTime {
+            9_007_199_254_740_991
+        } else if self.direction == SearchDirection::After
+            && self.anchor_key.is_none()
+            && !self.text.trim().is_empty()
+        {
+            -9_007_199_254_740_991
+        } else {
+            self.anchor_utc_ms
+        }
+    }
+    pub fn includes_untimed(&self) -> bool {
+        self.direction == SearchDirection::NoTime || !self.text.trim().is_empty()
+    }
     pub fn fingerprint(&self) -> String {
         let mask = self
             .preferences

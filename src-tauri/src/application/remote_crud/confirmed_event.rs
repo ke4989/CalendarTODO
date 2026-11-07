@@ -101,7 +101,9 @@ pub(crate) fn parse_confirmed(input: &str) -> Result<ConfirmedEventRequest, Remo
     if input.len() > MAX_INPUT_BYTES {
         return Err(RemoteCrudError::InvalidInput);
     }
-    serde_json::from_str(input).map_err(|error| RemoteCrudError::InvalidInput)
+    serde_json::from_str(input).map_err(|_| {
+        RemoteCrudError::InvalidInput
+    })
 }
 impl ConfirmedEventView {
     pub(crate) fn from_runtime(

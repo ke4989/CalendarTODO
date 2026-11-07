@@ -1791,7 +1791,6 @@ impl Database {
             _actor_lifetime: actor_lifetime,
         })
     }
-
     pub(crate) fn matches_clock(&self, clock: &Arc<dyn Clock>) -> bool {
         self.clock_port.upgrade().is_some()
             && std::sync::Weak::ptr_eq(&self.clock_port, &Arc::downgrade(clock))
@@ -1799,7 +1798,6 @@ impl Database {
     pub(crate) fn actor_provenance(&self) -> std::sync::Weak<()> {
         Arc::downgrade(&self.owner)
     }
-
     pub(crate) fn creation_reservation_snapshot(
         &self,
         account_id: String,
@@ -3331,35 +3329,13 @@ impl Database {
 }
 
 enum Request {
-    SearchReadRevision {
-        respond_to: Sender<Result<u64, PersistenceError>>,
-    },
-    SearchRemoteKey {
-        account: String,
-        uid: String,
-        recurrence: String,
-        respond_to: Sender<Result<Option<Option<String>>, PersistenceError>>,
-    },
-    SearchWorkspacePage {
-        query: crate::domain::search_workspace::WorkspaceQuery,
-        respond_to: Sender<Result<crate::domain::search_workspace::SearchPage, PersistenceError>>,
-    },
-    SearchWorkspaceDetail {
-        identity: crate::domain::search_workspace::SearchIdentity,
-        respond_to: Sender<Result<crate::domain::search::SearchHit, PersistenceError>>,
-    },
-    SearchPreferences {
-        update: Option<crate::domain::search_workspace::SearchPreferences>,
-        respond_to:
-            Sender<Result<crate::domain::search_workspace::SearchPreferences, PersistenceError>>,
-    },
-    CalendarDisplayHidden {
-        respond_to: Sender<Result<Vec<String>, PersistenceError>>,
-    },
-    ReplaceCalendarDisplayHidden {
-        ids: Vec<String>,
-        respond_to: Sender<Result<(), PersistenceError>>,
-    },
+    SearchReadRevision {respond_to:Sender<Result<u64,PersistenceError>>},
+    SearchRemoteKey {account:String,uid:String,recurrence:String,respond_to:Sender<Result<Option<Option<String>>,PersistenceError>>},
+    SearchWorkspacePage { query: crate::domain::search_workspace::WorkspaceQuery, respond_to: Sender<Result<crate::domain::search_workspace::SearchPage, PersistenceError>> },
+    SearchWorkspaceDetail { identity: crate::domain::search_workspace::SearchIdentity, respond_to: Sender<Result<crate::domain::search::SearchHit, PersistenceError>> },
+    SearchPreferences { update: Option<crate::domain::search_workspace::SearchPreferences>, respond_to: Sender<Result<crate::domain::search_workspace::SearchPreferences, PersistenceError>> },
+    CalendarDisplayHidden { respond_to: Sender<Result<Vec<String>, PersistenceError>> },
+    ReplaceCalendarDisplayHidden { ids: Vec<String>, respond_to: Sender<Result<(), PersistenceError>> },
     QueueRemoteCrudDelete {
         input: QueueRemoteEventDelete,
         respond_to: Sender<Result<RemoteMutationSummary, PersistenceError>>,
@@ -3386,10 +3362,7 @@ enum Request {
         now_ms: i64,
         respond_to: Sender<Result<Option<i64>, PersistenceError>>,
     },
-    NotificationDeliveryCurrent {
-        job_id: String,
-        respond_to: Sender<Result<bool, PersistenceError>>,
-    },
+    NotificationDeliveryCurrent { job_id: String, respond_to: Sender<Result<bool, PersistenceError>> },
     ClaimDueNotificationJobs {
         now_ms: i64,
         respond_to: Sender<Result<Vec<NotificationJob>, PersistenceError>>,
@@ -3423,8 +3396,7 @@ enum Request {
     },
     DeleteLocalCalendarContents {
         calendar_id: String,
-        respond_to:
-            Sender<Result<crate::domain::local_todo::DeletedLocalCalendar, PersistenceError>>,
+        respond_to: Sender<Result<crate::domain::local_todo::DeletedLocalCalendar, PersistenceError>>,
     },
     MoveLocalTodo {
         todo_id: String,
@@ -3482,16 +3454,8 @@ enum Request {
         todo_id: String,
         respond_to: Sender<Result<(), PersistenceError>>,
     },
-    SoftDeleteOccurrence {
-        todo_id: String,
-        occurrence_key: String,
-        respond_to: Sender<Result<(), PersistenceError>>,
-    },
-    RestoreRecentlyDeletedOccurrence {
-        todo_id: String,
-        occurrence_key: String,
-        respond_to: Sender<Result<LocalTodo, PersistenceError>>,
-    },
+    SoftDeleteOccurrence { todo_id: String, occurrence_key: String, respond_to: Sender<Result<(), PersistenceError>> },
+    RestoreRecentlyDeletedOccurrence { todo_id: String, occurrence_key: String, respond_to: Sender<Result<LocalTodo, PersistenceError>> },
     RestoreRecentlyDeleted {
         todo_id: String,
         respond_to: Sender<Result<LocalTodo, PersistenceError>>,
@@ -3598,86 +3562,19 @@ enum Request {
         connected: scoped_event::ConnectedOwnerCheck,
         respond_to: Sender<Result<scoped_event::ScopedEventSnapshot, PersistenceError>>,
     },
-    SelectConfirmedTarget {
-        input: scoped_event::ConfirmedTargetInput,
-        actor: std::sync::Weak<()>,
-        respond_to: Sender<Result<scoped_event::ConfirmedTarget, PersistenceError>>,
-    },
-    AdmitConfirmedTarget {
-        input: scoped_event::ConfirmedTargetInput,
-        target: scoped_event::ConfirmedTarget,
-        actor: std::sync::Weak<()>,
-        connected: scoped_event::ConnectedOwnerCheck,
-        respond_to: Sender<Result<scoped_event::ScopedEventSnapshot, PersistenceError>>,
-    },
-    RehydrateScopedEvent {
-        kind: crate::domain::remote_crud::RemoteCrudKind,
-        operation_id: String,
-        account_id: String,
-        calendar_id: String,
-        resource_id: String,
-        actor: std::sync::Weak<()>,
-        connected: Option<scoped_event::ConnectedOwnerCheck>,
-        respond_to: Sender<Result<scoped_event::ScopedEventSnapshot, PersistenceError>>,
-    },
-    CaptureConflictScope {
-        kind: crate::domain::remote_crud::RemoteCrudKind,
-        operation_id: String,
-        account_id: String,
-        calendar_id: String,
-        resource_id: String,
-        actor: std::sync::Weak<()>,
-        respond_to: Sender<Result<scoped_event::ScopedEventSnapshot, PersistenceError>>,
-    },
-    AdmitScopedCrud {
-        input: scoped_event::ScopedCrudInput,
-        actor: std::sync::Weak<()>,
-        connected: Option<scoped_event::ConnectedOwnerCheck>,
-        respond_to: Sender<Result<scoped_event::ScopedEventSnapshot, PersistenceError>>,
-    },
-    ClaimScopedCreate {
-        scope: scoped_event::ScopedEventSnapshot,
-        request: crate::application::remote_mutation_runtime::MutationRequestGate,
-        respond_to: Sender<Result<Option<RemoteCreationClaim>, PersistenceError>>,
-    },
-    ClaimScopedDelete {
-        scope: scoped_event::ScopedEventSnapshot,
-        request: crate::application::remote_mutation_runtime::MutationRequestGate,
-        respond_to: Sender<Result<Option<RemoteDeletionClaim>, PersistenceError>>,
-    },
-    AdmitScopedEvent {
-        input: QueueRemoteEventUpdateV3,
-        confirmation: scoped_event::EventConfirmation,
-        actor: std::sync::Weak<()>,
-        connected: Option<scoped_event::ConnectedOwnerCheck>,
-        respond_to: Sender<Result<scoped_event::ScopedEventSnapshot, PersistenceError>>,
-    },
-    ClaimScopedEvent {
-        scope: scoped_event::ScopedEventSnapshot,
-        request: Option<crate::application::remote_mutation_runtime::MutationRequestGate>,
-        respond_to: Sender<Result<Option<RemoteEventMutationClaimV3>, PersistenceError>>,
-    },
-    ScopedEventSendSnapshot {
-        scope: scoped_event::ScopedEventSnapshot,
-        claim: RemoteEventMutationClaimV3,
-        respond_to: Sender<Result<RemoteEventUpdateSnapshotV3, PersistenceError>>,
-    },
-    ScopedEventReadAllowed {
-        scope: scoped_event::ScopedEventSnapshot,
-        claim: RemoteEventMutationClaimV3,
-        respond_to: Sender<Result<bool, PersistenceError>>,
-    },
-    ScopedEventStatus {
-        scope: scoped_event::ScopedEventSnapshot,
-        respond_to:
-            Sender<Result<crate::domain::remote_crud::RemoteCrudOperation, PersistenceError>>,
-    },
-    ResolveScopedEvent {
-        scope: scoped_event::ScopedEventSnapshot,
-        choice: ConflictResolutionChoice,
-        connected: Option<scoped_event::ConnectedOwnerCheck>,
-        respond_to: Sender<Result<ConflictResolutionResult, PersistenceError>>,
-    },
+    SelectConfirmedTarget { input: scoped_event::ConfirmedTargetInput, actor: std::sync::Weak<()>, respond_to: Sender<Result<scoped_event::ConfirmedTarget, PersistenceError>> },
+    AdmitConfirmedTarget { input: scoped_event::ConfirmedTargetInput, target: scoped_event::ConfirmedTarget, actor: std::sync::Weak<()>, connected: scoped_event::ConnectedOwnerCheck, respond_to: Sender<Result<scoped_event::ScopedEventSnapshot, PersistenceError>> },
+    RehydrateScopedEvent { kind:crate::domain::remote_crud::RemoteCrudKind,operation_id:String,account_id:String,calendar_id:String,resource_id:String,actor:std::sync::Weak<()>,connected:Option<scoped_event::ConnectedOwnerCheck>,respond_to:Sender<Result<scoped_event::ScopedEventSnapshot,PersistenceError>> },
+    CaptureConflictScope { kind:crate::domain::remote_crud::RemoteCrudKind,operation_id:String,account_id:String,calendar_id:String,resource_id:String,actor:std::sync::Weak<()>,respond_to:Sender<Result<scoped_event::ScopedEventSnapshot,PersistenceError>> },
+    AdmitScopedCrud { input:scoped_event::ScopedCrudInput,actor:std::sync::Weak<()>,connected:Option<scoped_event::ConnectedOwnerCheck>,respond_to:Sender<Result<scoped_event::ScopedEventSnapshot,PersistenceError>> },
+    ClaimScopedCreate {scope:scoped_event::ScopedEventSnapshot,request:crate::application::remote_mutation_runtime::MutationRequestGate,respond_to:Sender<Result<Option<RemoteCreationClaim>,PersistenceError>>},
+    ClaimScopedDelete {scope:scoped_event::ScopedEventSnapshot,request:crate::application::remote_mutation_runtime::MutationRequestGate,respond_to:Sender<Result<Option<RemoteDeletionClaim>,PersistenceError>>},
+    AdmitScopedEvent { input: QueueRemoteEventUpdateV3, confirmation: scoped_event::EventConfirmation, actor: std::sync::Weak<()>, connected:Option<scoped_event::ConnectedOwnerCheck>, respond_to: Sender<Result<scoped_event::ScopedEventSnapshot, PersistenceError>> },
+    ClaimScopedEvent { scope: scoped_event::ScopedEventSnapshot, request:Option<crate::application::remote_mutation_runtime::MutationRequestGate>, respond_to: Sender<Result<Option<RemoteEventMutationClaimV3>, PersistenceError>> },
+    ScopedEventSendSnapshot { scope: scoped_event::ScopedEventSnapshot, claim: RemoteEventMutationClaimV3, respond_to: Sender<Result<RemoteEventUpdateSnapshotV3, PersistenceError>> },
+    ScopedEventReadAllowed { scope: scoped_event::ScopedEventSnapshot, claim: RemoteEventMutationClaimV3, respond_to: Sender<Result<bool, PersistenceError>> },
+    ScopedEventStatus { scope: scoped_event::ScopedEventSnapshot, respond_to: Sender<Result<crate::domain::remote_crud::RemoteCrudOperation, PersistenceError>> },
+    ResolveScopedEvent { scope: scoped_event::ScopedEventSnapshot, choice: ConflictResolutionChoice, connected:Option<scoped_event::ConnectedOwnerCheck>, respond_to: Sender<Result<ConflictResolutionResult, PersistenceError>> },
 
     ClaimRemoteEvent {
         account_id: String,
@@ -3742,10 +3639,8 @@ enum Request {
         respond_to: Sender<Result<CommittedEventScheduleChange, PersistenceError>>,
     },
     RestoreScopedEvent {
-        claim: RemoteEventMutationClaimV3,
-        remote: RemoteReadBack,
-        request: crate::application::remote_mutation_runtime::MutationRequestGate,
-        respond_to: Sender<Result<RemoteEventMutationClaimV3, PersistenceError>>,
+        claim:RemoteEventMutationClaimV3,remote:RemoteReadBack,request:crate::application::remote_mutation_runtime::MutationRequestGate,
+        respond_to:Sender<Result<RemoteEventMutationClaimV3,PersistenceError>>,
     },
     FinishRemoteFields {
         claim: RemoteFieldsMutationClaim,
@@ -3911,10 +3806,7 @@ enum Request {
         now_ms: i64,
         respond_to: Sender<Result<ConflictResolutionResult, PersistenceError>>,
     },
-    SearchItems {
-        query: crate::domain::search::SearchQuery,
-        respond_to: Sender<Result<crate::domain::search::SearchResults, PersistenceError>>,
-    },
+    SearchItems { query: crate::domain::search::SearchQuery, respond_to: Sender<Result<crate::domain::search::SearchResults, PersistenceError>> },
     ListCalendarAgendaItems {
         respond_to: Sender<Result<Vec<CalendarAgendaItem>, PersistenceError>>,
     },
@@ -3945,20 +3837,11 @@ enum Request {
     },
     ICloudBindingLease {
         account_id: String,
-        respond_to: Sender<
-            Result<
-                Option<(
-                    crate::adapters::icloud_caldav::ICloudBinding,
-                    Arc<std::sync::atomic::AtomicBool>,
-                )>,
-                PersistenceError,
-            >,
-        >,
+        respond_to: Sender<Result<Option<(crate::adapters::icloud_caldav::ICloudBinding, Arc<std::sync::atomic::AtomicBool>)>, PersistenceError>>,
     },
     ICloudBinding {
         account_id: String,
-        respond_to:
-            Sender<Result<Option<crate::adapters::icloud_caldav::ICloudBinding>, PersistenceError>>,
+        respond_to: Sender<Result<Option<crate::adapters::icloud_caldav::ICloudBinding>, PersistenceError>>,
     },
     ReplaceDiscoveredCalendars {
         account_id: String,
@@ -4232,7 +4115,6 @@ fn run_actor(
                     &calendar_id,
                 ));
             }
-
             Request::MoveLocalTodo {
                 todo_id,
                 calendar_id,
@@ -5839,8 +5721,6 @@ fn run_actor(
 
 #[path = "persistence/calendar_display_selection.rs"]
 mod calendar_display_selection;
-/// Latest schema version produced by [`migrations`]. Gates that require the
-/// exact product schema compare against this instead of a literal.
 #[path = "persistence/icloud_binding.rs"]
 mod icloud_binding;
 #[path = "persistence/search_workspace.rs"]
@@ -11269,7 +11149,10 @@ fn list_calendar_agenda_items_selected(
                SELECT 1 FROM calendar_resource_recurrence rr
                WHERE rr.resource_id=p.resource_id AND rr.enabled=1
            ))
-           AND (EXISTS(SELECT 1 FROM remote_delete_operations d WHERE d.resource_id=p.resource_id AND d.state IN ('pending','conflict')) OR ?1 IS NULL OR p.start_at_utc_ms IS NULL OR p.end_at_utc_ms IS NULL OR
+           AND (EXISTS(SELECT 1 FROM remote_delete_operations d WHERE d.resource_id=p.resource_id AND d.state IN ('pending','conflict'))
+                OR EXISTS(SELECT 1 FROM outbox_operations o WHERE o.resource_id=p.resource_id AND o.operation_kind='update_event' AND o.state IN ('pending','conflict'))
+                OR EXISTS(SELECT 1 FROM remote_update_successors u WHERE u.resource_id=p.resource_id AND u.state<>'cancelled')
+                OR ?1 IS NULL OR p.start_at_utc_ms IS NULL OR p.end_at_utc_ms IS NULL OR
                 ((c.display_future_unbounded=1 OR p.start_at_utc_ms < ?1 + c.display_future_days * 86400000) AND
                  (c.display_past_unbounded=1 OR p.start_at_utc_ms >= ?1 - c.display_past_days * 86400000 OR
                   p.end_at_utc_ms > ?1 - c.display_past_days * 86400000)))

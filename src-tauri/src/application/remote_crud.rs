@@ -178,8 +178,6 @@ impl RemoteCrudApplication {
             )),
         }
     }
-    /// Raw bounded JSON preserves duplicate keys until strict DTO deserialization.
-    /// No Value intermediate may erase them before this boundary.
     fn prepare(&self, input: RemoteCrudRequest) -> Result<RemoteCrudResponse, RemoteCrudError> {
         match input {
             RemoteCrudRequest::Create(i) => {

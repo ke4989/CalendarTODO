@@ -124,26 +124,21 @@ pub(super) fn page(c: &Connection, query: WorkspaceQuery) -> Result<SearchPage, 
     } else {
         "sort_stamp>=?1"
     };
-    let stamp = position.as_ref().map_or(
-        if query.direction == SearchDirection::NoTime {
-            9_007_199_254_740_991
-        } else {
-            query.anchor_utc_ms
-        },
-        |v| v.time,
-    );
+    let stamp = position.as_ref().map_or(query.initial_time(), |v| v.time);
     let key = position
         .as_ref()
         .map_or(query.anchor_key.as_deref().unwrap_or(""), |v| {
             v.key.as_str()
         });
+    let time_filter = if query.direction == SearchDirection::NoTime {
+        "AND stamp IS NULL"
+    } else if query.includes_untimed() {
+        ""
+    } else {
+        "AND stamp IS NOT NULL"
+    };
     let sql = format!(
-        "{FACTS} SELECT kind,id,occurrence,resource,calendar,calendar_name,color,title,notes,location,stamp,finish,completed,head,successor FROM keyed WHERE {filter} AND (?3 OR completed=0) {} ORDER BY sort_stamp {},stable_key {} LIMIT 256",
-        if query.direction == SearchDirection::NoTime {
-            "AND stamp IS NULL"
-        } else {
-            "AND stamp IS NOT NULL"
-        },
+        "{FACTS} SELECT kind,id,occurrence,resource,calendar,calendar_name,color,title,notes,location,stamp,finish,completed,head,successor FROM keyed WHERE {filter} AND (?3 OR completed=0) {time_filter} ORDER BY sort_stamp {},stable_key {} LIMIT 256",
         if reverse { "DESC" } else { "ASC" },
         if reverse { "DESC" } else { "ASC" }
     );
@@ -153,12 +148,7 @@ pub(super) fn page(c: &Connection, query: WorkspaceQuery) -> Result<SearchPage, 
     let tag_sql = if query.preferences.fields.contains(&SearchField::Tags) {
         let table = "SELECT 'todo:'||j.local_todo_id AS owner,t.name FROM local_todo_tags j JOIN tags t ON t.tag_id=j.tag_id UNION ALL SELECT 'calendar:'||j.resource_id,t.name FROM calendar_resource_tags j JOIN tags t ON t.tag_id=j.tag_id";
         Some(format!(
-            "{FACTS}, candidates AS (SELECT kind,id,resource FROM keyed WHERE {filter} AND (?3 OR completed=0) {} ORDER BY sort_stamp {},stable_key {} LIMIT 256) SELECT tags.owner,tags.name FROM ({table}) tags JOIN candidates c ON tags.owner=CASE WHEN c.kind='todo' THEN 'todo:'||c.id ELSE 'calendar:'||c.resource END",
-            if query.direction == SearchDirection::NoTime {
-                "AND stamp IS NULL"
-            } else {
-                "AND stamp IS NOT NULL"
-            },
+            "{FACTS}, candidates AS (SELECT kind,id,resource FROM keyed WHERE {filter} AND (?3 OR completed=0) {time_filter} ORDER BY sort_stamp {},stable_key {} LIMIT 256) SELECT tags.owner,tags.name FROM ({table}) tags JOIN candidates c ON tags.owner=CASE WHEN c.kind='todo' THEN 'todo:'||c.id ELSE 'calendar:'||c.resource END",
             if reverse { "DESC" } else { "ASC" },
             if reverse { "DESC" } else { "ASC" }
         ))
@@ -186,9 +176,7 @@ pub(super) fn page(c: &Connection, query: WorkspaceQuery) -> Result<SearchPage, 
         for index in [13, 14] {
             let intent: String = row.get(index)?;
             if !intent.is_empty() {
-                crate::domain::remote_event_update::decode_stored_event_intent_v3(
-                    intent.as_bytes(),
-                )?;
+                crate::domain::remote_event_update::decode_stored_event_intent_v3(intent.as_bytes())?;
             }
         }
         let identity = if kind == "todo" {

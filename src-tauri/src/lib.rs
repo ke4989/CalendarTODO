@@ -71,14 +71,37 @@ fn execute_desktop_restore(app: &tauri::AppHandle, request: adapters::windows_de
                 return;
             }
             let hwnd = desktop::observed_window();
-            let needs_repair = desktop::window_state(hwnd).is_some_and(|native| {
+            let native = desktop::window_state(hwnd);
+            let order = desktop::desktop_surface()
+                .map(|surface| desktop::desktop_order(hwnd, surface));
+            if request.observation {
+                use desktop::{ObservationVerdict, observation_verdict};
+                match native.map(|s| observation_verdict(hwnd, s, order)) {
+                    Some(ObservationVerdict::Repair) => {
+                    }
+                    Some(ObservationVerdict::Healthy) => {
+                        desktop::completed(request, Some(true));
+                        return;
+                    }
+                    _ => {
+                        desktop::completed(request, None);
+                        return;
+                    }
+                }
+            }
+            let on_desktop = desktop::on_current_virtual_desktop(hwnd);
+            let needs_repair = native.is_some_and(|native| {
                 !desktop::restore_succeeded(native)
-                    || desktop::desktop_surface().is_none_or(|surface| {
-                        desktop::desktop_order(hwnd, surface) != desktop::DesktopOrder::Above
-                    })
+                    || order != Some(desktop::DesktopOrder::Above)
             });
-            if !needs_repair || !desktop::on_current_virtual_desktop(hwnd) {
+            if !needs_repair || !on_desktop {
                 desktop::completed(request, Some(true));
+                return;
+            }
+            // Observation episodes skip the reveal animation and go straight to
+            // the native Restore. Normal episodes prepare the renderer first.
+            if request.observation {
+                desktop::completed(request, Some(false));
                 return;
             }
             if let Some(window) = current_app.get_webview_window("desktop") {
@@ -121,17 +144,25 @@ fn execute_desktop_restore(app: &tauri::AppHandle, request: adapters::windows_de
             if hwnd.is_null() || !request.is_current() {
                 return None;
             }
+            if request.observation && request.needs_restore() {
+                let order = desktop::desktop_surface()
+                    .map(|surface| desktop::desktop_order(hwnd, surface));
+                use desktop::{ObservationVerdict, observation_verdict};
+                if observation_verdict(hwnd, before, order) != ObservationVerdict::Repair {
+                    return None;
+                }
+            }
             let applied = !request.needs_restore()
                 || adapters::window::restore_after_show_desktop(hwnd, before.cloak_reason, || {
                     request.is_current()
                 })
                 .is_ok();
             let after = desktop::window_state(hwnd)?;
+            let surface = desktop::desktop_surface();
+            let order = surface.map(|surface| desktop::desktop_order(hwnd, surface));
             let healthy = applied
                 && desktop::restore_succeeded(after)
-                && desktop::desktop_surface().is_some_and(|surface| {
-                    desktop::desktop_order(hwnd, surface) == desktop::DesktopOrder::Above
-                });
+                && order == Some(desktop::DesktopOrder::Above);
             if !request.needs_restore()
                 && request.attempt == 2
                 && !healthy
@@ -614,7 +645,7 @@ pub fn run() {
             let account_registry = Arc::new(AccountSourceRegistry::new(database.clone()));
             let credential_service =
                 CredentialService::new(Arc::new(adapters::credentials::WindowsCredentialStore));
-                        let production_attacher = Arc::new(
+            let production_attacher = Arc::new(
                 adapters::production_attachment::ProductionSourceAttacher::new(
                     account_registry.clone(),
                     credential_service.clone(),
@@ -639,7 +670,7 @@ pub fn run() {
             let account_profiles = AccountProfileService::new(
                 account_registry.clone(),
                 credential_service.clone(),
-                                production_attacher,
+                production_attacher,
             );
             let (sync_deadline_sender, sync_deadline_receiver) = mpsc::channel();
             let sync_scheduler = Arc::new(adapters::sync_timer::SystemSyncDeadlineScheduler::new(
@@ -839,6 +870,13 @@ pub fn run() {
             ipc::set_account_remote_editing_enabled,
             ipc::prepare_remote_crud,
             ipc::confirmed_remote_event,
+            ipc::get_agenda_presentation,
+            ipc::begin_presented_create,
+            ipc::observe_presented_creates,
+            ipc::stage_presented_remote_delete,
+            ipc::undo_presented_remote_delete,
+            ipc::expire_presented_remote_delete,
+            ipc::retry_presented_create_metadata,
             ipc::set_remote_execution_activation,
             ipc::get_remote_execution_activation,
             ipc::submit_prepared_remote_crud,

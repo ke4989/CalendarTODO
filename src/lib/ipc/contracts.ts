@@ -305,6 +305,22 @@ export interface AgendaRefreshNotice { reason: "recurrenceHorizon" | "calendarSy
 /** Shared process-session view choice; independent of stored visibility/sync. */
 export interface CalendarDisplaySelection { version: number; hiddenCalendarIds: string[]; }
 
+export interface PresentedIdentity { presentationId: string; revision: number; }
+export interface PresentedCreate extends PresentedIdentity {
+  source: "local" | "remote"; owner: string; draft: SaveLocalTodo;
+  calendarName: string; calendarColor: string | null;
+  phase: "submitting" | "committed" | "failed"; failure: string | null; feedback: number; reconciliationReady: boolean;
+  localItem: LocalTodo | null; remote: ConfirmedEventView | null; observed: string[];
+}
+export interface PresentedDelete {
+  deletionId: string; owner: string; item: CalendarAgendaItem; expiresAtMs: number;
+  phase: "undoable" | "admitting" | "admitted" | "failed";
+  failure: string | null; remote: ConfirmedEventView | null; feedback: number;
+}
+export interface AgendaPresentationSnapshot { version: number; creates: PresentedCreate[]; remoteDeletes: PresentedDelete[]; }
+export interface PresentedDeleteExpiry extends AgendaPresentationSnapshot { remainingMs: number | null; }
+export interface BeginPresentedCreate { source: "local" | "remote"; draft: SaveLocalTodo; calendarName: string; calendarColor: string | null; recovery: PresentedIdentity | null; }
+
 export interface CalendarAgendaItem {
   remoteEditEligible?: boolean;
   remoteEditBlockedReason?: string | null;

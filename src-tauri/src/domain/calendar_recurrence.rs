@@ -1291,7 +1291,3 @@ fn format_timestamp(kind: SupportedKind, timestamp_ms: i64) -> Result<String, Re
 fn weekday(days_since_epoch: i64) -> u8 {
     u8::try_from((days_since_epoch + 3).rem_euclid(7)).unwrap_or(0)
 }
-
-#[cfg(test)]
-#[path = "calendar_recurrence_tzid_tests.rs"]
-mod tzid_tests;

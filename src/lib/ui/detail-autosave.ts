@@ -8,12 +8,13 @@ export class DetailAutosave<T> {
   private scheduled = 0;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private running = false;
+  private active: { session: number; revision: number; snapshot: T; explicit: boolean } | null = null;
   private queued: { session: number; revision: number; snapshot: T; explicit: boolean } | null = null;
   private latest: T | null = null;
   private frozen = false;
   private alive = true;
   constructor(private readonly capture: () => T | null,
-    private readonly commit: (snapshot: T, explicit: boolean, current: () => boolean) => Promise<boolean>,
+    private readonly commit: (snapshot: T, explicit: () => boolean, current: () => boolean) => Promise<boolean>,
     private readonly freeze: (frozen: boolean) => void) {}
   get snapshot() { return this.latest; }
   get saving() { return this.frozen; }
@@ -45,6 +46,12 @@ export class DetailAutosave<T> {
   save() {
     if (this.frozen || !this.alive) return;
     this.clearTimer();
+    const existing = this.queued ?? this.active;
+    if (existing?.session === this.session && existing.revision === this.revision) {
+      existing.explicit = true;
+      this.frozen = true; this.freeze(true);
+      return;
+    }
     const snapshot = this.capture();
     if (snapshot === null) return;
     this.latest = snapshot;
@@ -65,14 +72,16 @@ export class DetailAutosave<T> {
       while (this.queued) {
         const job = this.queued;
         this.queued = null;
+        this.active = job;
         const current = () => this.alive && this.session === job.session && this.revision === job.revision;
         try {
-          const success = await this.commit(job.snapshot, job.explicit, current);
+          const success = await this.commit(job.snapshot, () => job.explicit, current);
           if (this.session === job.session) {
             if (success) { this.admitted = Math.max(this.admitted, job.revision); if (this.revision === job.revision) this.latest = null; }
             else if (!this.queued) this.scheduled = this.admitted;
           }
         } finally {
+          this.active = null;
           if (job.explicit && this.session === job.session) { this.frozen = false; if (this.alive) this.freeze(false); }
         }
       }

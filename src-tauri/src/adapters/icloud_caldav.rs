@@ -5,41 +5,6 @@ use url::{Host, Url};
 
 pub(crate) const BOOTSTRAP: &str = "https://caldav.icloud.com/";
 
-#[cfg(test)]
-#[allow(dead_code)]
-pub(crate) fn bind_writable_fixture(
-    database: &crate::adapters::persistence::Database,
-    account: &str,
-    host: &str,
-) {
-    let binding = ICloudBinding {
-        bootstrap_url: BOOTSTRAP.into(),
-        principal_url: format!("https://{host}/principal/"),
-        home_url: format!("https://{host}/"),
-        generation: 0,
-    };
-    let routes = database
-        .available_calendar_ids_by_url(account.into())
-        .unwrap();
-    let settings = database.list_calendar_settings().unwrap();
-    let calendars = routes
-        .into_iter()
-        .map(|(route, id)| {
-            let setting = settings.iter().find(|s| s.calendar_id == id).unwrap();
-            crate::adapters::persistence::DiscoveredCalendarRecord {
-                calendar_id: id,
-                collection_url: binding.collection(&route).unwrap().to_string(),
-                display_name: setting.display_name.clone(),
-                server_color: setting.server_color.clone(),
-                privileges: "read,write-content".into(),
-            }
-        })
-        .collect();
-    database
-        .replace_icloud_discovery(account.into(), calendars, binding, 1)
-        .unwrap();
-}
-
 pub(crate) fn trusted_host(host: &str) -> bool {
     if matches!(host, "caldav.icloud.com" | "caldav.icloud.com.cn") {
         return true;

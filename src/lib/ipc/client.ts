@@ -38,6 +38,14 @@ export function searchItems(query: import("./contracts").SearchQuery): Promise<i
   return invoke("search_items", { query });
 }
 
+export function getAgendaPresentation(): Promise<import("./contracts").AgendaPresentationSnapshot> { return invoke("get_agenda_presentation"); }
+export function beginPresentedCreate(input: import("./contracts").BeginPresentedCreate): Promise<import("./contracts").AgendaPresentationSnapshot> { return invoke("begin_presented_create", { input }); }
+export function observePresentedCreates(identities: import("./contracts").PresentedIdentity[]): Promise<import("./contracts").AgendaPresentationSnapshot> { return invoke("observe_presented_creates", { identities }); }
+export function stagePresentedRemoteDelete(resourceId: string): Promise<import("./contracts").AgendaPresentationSnapshot> { return invoke("stage_presented_remote_delete", { resourceId }); }
+export function undoPresentedRemoteDelete(deletionId: string): Promise<import("./contracts").AgendaPresentationSnapshot> { return invoke("undo_presented_remote_delete", { deletionId }); }
+export function expirePresentedRemoteDelete(deletionId: string): Promise<import("./contracts").PresentedDeleteExpiry> { return invoke("expire_presented_remote_delete", { deletionId }); }
+export function retryPresentedCreateMetadata(identity: import("./contracts").PresentedIdentity): Promise<import("./contracts").AgendaPresentationSnapshot> { return invoke("retry_presented_create_metadata", { identity }); }
+
 export const calendarDisplaySelectionEvent = "calendar-todo://calendar-display-selection-changed";
 export function getCalendarDisplaySelection(): Promise<import("./contracts").CalendarDisplaySelection> {
   return invoke("get_calendar_display_selection");

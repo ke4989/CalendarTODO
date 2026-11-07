@@ -305,9 +305,6 @@ impl RemoteSearch {
         }
         Ok(state.task.as_ref().ok_or(())?.view.clone())
     }
-    /// Explicit development observation of one already-bound Probe segment.
-    /// The separate empty actor supplies only cache-key lookups; transport and
-    /// generation ownership remain with the live, exact-bound registry.
     fn read_segment(
         &self,
         s: &Segment,
@@ -481,12 +478,12 @@ impl RemoteSearch {
                         position > cursor.position
                     }
                 } else if query.direction == SearchDirection::Before {
-                    position.time < query.anchor_utc_ms
+                    position.time < query.initial_time()
                 } else if query.direction == SearchDirection::NoTime {
                     row.start_at_utc_ms.is_none()
                 } else {
-                    position.time > query.anchor_utc_ms
-                        || (position.time == query.anchor_utc_ms
+                    position.time > query.initial_time()
+                        || (position.time == query.initial_time()
                             && query
                                 .anchor_key
                                 .as_ref()
@@ -500,11 +497,12 @@ impl RemoteSearch {
                             position <= cursor.position
                         }
                     });
-                if included
-                    && scanned
-                    && (query.direction == SearchDirection::NoTime || row.start_at_utc_ms.is_some())
-                    && !all.iter().any(|v| v.key == row.key)
-                {
+                let time_included = if query.direction == SearchDirection::NoTime {
+                    row.start_at_utc_ms.is_none()
+                } else {
+                    query.includes_untimed() || row.start_at_utc_ms.is_some()
+                };
+                if included && scanned && time_included && !all.iter().any(|v| v.key == row.key) {
                     all.push(row.clone());
                 }
             }

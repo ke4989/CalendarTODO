@@ -717,8 +717,8 @@ pub(crate) fn validate_v2_location(location: &str) -> Result<&str, RemoteMutatio
 }
 /// A literal backslash immediately before a newline escapes to `\\`+`\n`, which
 /// iCloud re-encodes as `\\`+`\\`+`n`: the newline becomes a letter and the
-/// stored value changes. Reject that one pattern locally instead of submitting
-/// content the server rewrites.
+/// stored value changes.
+/// Reject it locally instead of submitting content the server rewrites.
 pub(crate) fn description_ends_line_with_backslash(description: &str) -> bool {
     description.contains("\\\n")
 }

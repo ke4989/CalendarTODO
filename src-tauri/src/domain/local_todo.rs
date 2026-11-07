@@ -129,7 +129,7 @@ pub struct FixedRecurrence {
     pub options: RecurrenceOptions,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FixedRecurrenceInput {
     pub frequency: RecurrenceFrequency,
@@ -253,7 +253,7 @@ pub struct UpdateLocalTodo {
     pub recurrence: Option<FixedRecurrenceInput>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveLocalTodo {
     pub todo_id: Option<String>,

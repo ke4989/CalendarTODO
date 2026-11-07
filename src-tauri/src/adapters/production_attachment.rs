@@ -1,12 +1,11 @@
 use crate::{
     adapters::{
         caldav::{
-            AdapterAccountContext, DiscoveredCalendarCollection, ExecutingCalDavAdapter,
+            AdapterAccountContext, ExecutingCalDavAdapter,
             discover_icloud,
         },
         caldav_http::{HttpDavConfig, HttpDavExecutor},
         caldav_transport::{DavAuthentication, DavExecutor},
-        credentials::WindowsCredentialStore,
         persistence::{Database, DiscoveredCalendarRecord},
     },
     application::{
@@ -23,177 +22,24 @@ use crate::{
             CalDavSourceFactory, ProviderReadError, ReadOnlyCalendarSource, SourceFactoryError,
         },
         clock::Clock,
-        credentials::{CredentialError, CredentialRecord, CredentialRef, CredentialStore},
+        credentials::{CredentialRecord, CredentialRef},
     },
 };
 use std::{
     collections::{BTreeSet, HashSet},
     sync::Arc,
 };
-use thiserror::Error;
 use uuid::Uuid;
 
 const ENTRY_URL: &str = super::icloud_caldav::BOOTSTRAP;
 const REGION_PROFILE: &str = "icloud-cn";
 
-/// Bounded evidence from one explicit, read-only China-region diagnostic.
-/// Collection names, hrefs, privilege strings, and credential data stay inside
-/// this adapter and are never returned to its caller.
-pub struct ICloudChinaReadDiagnostic {
-    pub calendar_count: u32,
-    pub approved_count: u32,
-    pub writable_count: u32,
-}
 
-#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-pub enum ICloudChinaReadDiagnosticError {
-    #[error("invalid diagnostic selection")]
-    InvalidSelection,
-    #[error("credential action required")]
-    CredentialActionRequired,
-    #[error("credential service unavailable")]
-    CredentialUnavailable,
-    #[error("account identity mismatch")]
-    AccountMismatch,
-    #[error("reviewed read transport unavailable")]
-    TransportUnavailable,
-    #[error("calendar discovery unauthorized")]
-    Unauthorized,
-    #[error("calendar discovery transient failure")]
-    Transient,
-    #[error("calendar discovery unsafe or incomplete")]
-    UnsafeDiscovery,
-    #[error("approved calendar selection unavailable")]
-    TargetUnavailable,
-    #[error("approved calendar lacks content-write privilege")]
-    TargetReadOnly,
-}
 
-/// Uses only the existing reviewed read executor and pinned China host policy.
-/// It performs no SQLite write, credential provisioning, or DAV mutation.
-pub fn diagnose_icloud_china_read_only(
-    reference: &CredentialRef,
-    expected_username: &str,
-    approved_names: [&str; 2],
-) -> Result<ICloudChinaReadDiagnostic, ICloudChinaReadDiagnosticError> {
-    diagnose_icloud_china_with(
-        reference,
-        expected_username,
-        approved_names,
-        &WindowsCredentialStore,
-        &ReviewedHttpDavExecutorFactory,
-    )
-}
 
-/// Authorized diagnostic variant that uses the username stored inside the
-/// uniquely selected credential record. The username never crosses argv,
-/// stdout, SQLite, or the returned bounded report.
-pub fn diagnose_icloud_china_read_only_stored_identity(
-    reference: &CredentialRef,
-    approved_names: [&str; 2],
-) -> Result<ICloudChinaReadDiagnostic, ICloudChinaReadDiagnosticError> {
-    diagnose_icloud_china_with_optional_identity(
-        reference,
-        None,
-        approved_names,
-        &WindowsCredentialStore,
-        &ReviewedHttpDavExecutorFactory,
-    )
-}
 
-fn diagnose_icloud_china_with(
-    reference: &CredentialRef,
-    expected_username: &str,
-    approved_names: [&str; 2],
-    store: &dyn CredentialStore,
-    executors: &dyn DavExecutorFactory,
-) -> Result<ICloudChinaReadDiagnostic, ICloudChinaReadDiagnosticError> {
-    diagnose_icloud_china_with_optional_identity(
-        reference,
-        Some(expected_username),
-        approved_names,
-        store,
-        executors,
-    )
-}
 
-fn diagnose_icloud_china_with_optional_identity(
-    reference: &CredentialRef,
-    expected_username: Option<&str>,
-    approved_names: [&str; 2],
-    store: &dyn CredentialStore,
-    executors: &dyn DavExecutorFactory,
-) -> Result<ICloudChinaReadDiagnostic, ICloudChinaReadDiagnosticError> {
-    if expected_username.is_some_and(|username| {
-        username.is_empty() || username.len() > 512 || username.chars().any(char::is_control)
-    }) || approved_names
-        .iter()
-        .any(|name| name.is_empty() || name.len() > 256 || name.chars().any(char::is_control))
-        || approved_names[0] == approved_names[1]
-    {
-        return Err(ICloudChinaReadDiagnosticError::InvalidSelection);
-    }
-    let credential = store.read(reference).map_err(|error| match error {
-        CredentialError::NotFound => ICloudChinaReadDiagnosticError::CredentialActionRequired,
-        _ => ICloudChinaReadDiagnosticError::CredentialUnavailable,
-    })?;
-    if expected_username
-        .is_some_and(|username| !credential.username().eq_ignore_ascii_case(username))
-    {
-        return Err(ICloudChinaReadDiagnosticError::AccountMismatch);
-    }
-    let executor = executors
-        .create()
-        .map_err(|_| ICloudChinaReadDiagnosticError::TransportUnavailable)?;
-    let found = discover_icloud(
-        ENTRY_URL,
-        DavAuthentication::from_credential(&credential),
-        executor,
-    )
-    .map_err(|error| match error {
-        crate::ports::caldav::ProviderReadError::Unauthorized => {
-            ICloudChinaReadDiagnosticError::Unauthorized
-        }
-        crate::ports::caldav::ProviderReadError::Transient => {
-            ICloudChinaReadDiagnosticError::Transient
-        }
-        _ => ICloudChinaReadDiagnosticError::UnsafeDiscovery,
-    })?;
-    summarize_diagnostic_collections(&found.calendars, approved_names)
-}
 
-fn summarize_diagnostic_collections(
-    found: &[DiscoveredCalendarCollection],
-    approved_names: [&str; 2],
-) -> Result<ICloudChinaReadDiagnostic, ICloudChinaReadDiagnosticError> {
-    let mut writable_count = 0_u32;
-    for name in approved_names {
-        let mut matches = found
-            .iter()
-            .filter(|calendar| calendar.display_name == name);
-        let Some(calendar) = matches.next() else {
-            return Err(ICloudChinaReadDiagnosticError::TargetUnavailable);
-        };
-        if matches.next().is_some() {
-            return Err(ICloudChinaReadDiagnosticError::TargetUnavailable);
-        }
-        if calendar
-            .privileges
-            .iter()
-            .any(|privilege| privilege == "write" || privilege == "write-content")
-        {
-            writable_count += 1;
-        }
-    }
-    if writable_count != 2 {
-        return Err(ICloudChinaReadDiagnosticError::TargetReadOnly);
-    }
-    Ok(ICloudChinaReadDiagnostic {
-        calendar_count: u32::try_from(found.len()).unwrap_or(u32::MAX),
-        approved_count: 2,
-        writable_count,
-    })
-}
 
 pub trait DavExecutorFactory: Send + Sync + 'static {
     fn create(&self) -> Result<Arc<dyn DavExecutor>, SourceFactoryError>;

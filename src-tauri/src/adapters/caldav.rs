@@ -120,142 +120,6 @@ pub struct DiscoveredCalendarCollection {
     pub privileges: Vec<String>,
 }
 
-/// Performs only the principal and calendar-home discovery needed to bootstrap
-/// an explicitly approved read-only gate. Callers must fail closed when their
-/// selection does not resolve to the expected collection count.
-pub fn discover_vevent_collections(
-    entry_url: &str,
-    trusted_hosts: BTreeSet<String>,
-    authentication: DavAuthentication,
-    executor: Arc<dyn DavExecutor>,
-) -> Result<Vec<DiscoveredCalendarCollection>, ProviderReadError> {
-    let adapter = ExecutingCalDavAdapter::new(
-        AdapterAccountContext {
-            account_id: String::new(),
-            provider_kind: "caldav".into(),
-            user_label: String::new(),
-            credential_ref: String::new(),
-            region_profile: String::new(),
-            trusted_hosts,
-            calendar_ids_by_href: BTreeMap::new(),
-        },
-        entry_url,
-        authentication,
-        executor,
-        0,
-    )?;
-    let mut discovery_response = adapter.execute(
-        DavMethod::Propfind,
-        adapter.entry_url.clone(),
-        DISCOVERY_BODY.to_vec(),
-        DavDepth::Zero,
-    )?;
-    eprintln!(
-        "read_gate stage=entry status={} body_bytes={}",
-        discovery_response.status(),
-        discovery_response.body().len()
-    );
-    require_read_status(discovery_response.status())?;
-    let mut discovery = match parse_discovery_relaxed(discovery_response.body()) {
-        Ok(discovery) => discovery,
-        Err(error) => {
-            let shape = discovery_shape(discovery_response.body());
-            eprintln!(
-                "read_gate stage=entry_parse responses={} propstats={} statuses={} principal_properties={} home_properties={} malformed={}",
-                shape.responses,
-                shape.propstats,
-                shape.statuses,
-                shape.principal_properties,
-                shape.home_properties,
-                shape.malformed
-            );
-            return Err(error);
-        }
-    };
-    if discovery.calendar_home_href.is_empty() {
-        let principal_url = discovery_response
-            .final_url()
-            .join(&discovery.principal_href)
-            .map_err(|_| ProviderReadError::UnsafeData)?;
-        discovery_response = adapter.execute(
-            DavMethod::Propfind,
-            principal_url,
-            DISCOVERY_BODY.to_vec(),
-            DavDepth::Zero,
-        )?;
-        eprintln!(
-            "read_gate stage=principal status={} body_bytes={}",
-            discovery_response.status(),
-            discovery_response.body().len()
-        );
-        require_read_status(discovery_response.status())?;
-        let principal_discovery = parse_discovery_document(discovery_response.body())?;
-        if principal_discovery.calendar_home_href.is_empty() {
-            return Err(ProviderReadError::Incomplete);
-        }
-        discovery.calendar_home_href = principal_discovery.calendar_home_href;
-    }
-    let calendar_home_url = discovery_response
-        .final_url()
-        .join(&discovery.calendar_home_href)
-        .map_err(|_| ProviderReadError::UnsafeData)?;
-    let calendars_response = adapter.execute(
-        DavMethod::Propfind,
-        calendar_home_url,
-        CALENDARS_BODY.to_vec(),
-        DavDepth::One,
-    )?;
-    eprintln!(
-        "read_gate stage=calendar_home status={} body_bytes={}",
-        calendars_response.status(),
-        calendars_response.body().len()
-    );
-    require_read_status(calendars_response.status())?;
-    let parsed = match parse_calendars_detailed(calendars_response.body()) {
-        Ok(parsed) => parsed,
-        Err(failure) => {
-            let shape = calendar_shape(calendars_response.body());
-            eprintln!(
-                "read_gate stage=calendar_parse_shape checkpoint={} responses={} propstats={} statuses={} hrefs={} calendars={} supported_components={} privileges={} display_names={} colors={} successful_propstats={} failed_propstats={} failed_resourcetypes={} failed_supported_components={} failed_privilege_sets={} failed_display_names={} failed_colors={} malformed={}",
-                failure.checkpoint,
-                shape.responses,
-                shape.propstats,
-                shape.statuses,
-                shape.hrefs,
-                shape.calendars,
-                shape.supported_components,
-                shape.privileges,
-                shape.display_names,
-                shape.colors,
-                shape.successful_propstats,
-                shape.failed_propstats,
-                shape.failed_resourcetypes,
-                shape.failed_supported_components,
-                shape.failed_privilege_sets,
-                shape.failed_display_names,
-                shape.failed_colors,
-                shape.malformed
-            );
-            return Err(failure.class);
-        }
-    };
-    eprintln!(
-        "read_gate stage=calendar_parse vevent_count={}",
-        parsed.len()
-    );
-    Ok(parsed
-        .into_iter()
-        .map(|calendar| DiscoveredCalendarCollection {
-            href: calendar.href,
-            display_name: calendar.display_name,
-            server_color: calendar.color,
-            privileges: calendar.privileges,
-        })
-        .collect())
-}
-
-/// Backend-only synthetic factory used to exercise the complete application
-/// orchestration path without selecting or constructing a network client.
 
 impl ExecutingCalDavAdapter {
     pub fn new(
@@ -279,16 +143,6 @@ impl ExecutingCalDavAdapter {
             icloud_binding: None,
         })
     }
-
-    /// Fresh Depth-0 metadata only, for the explicit read-only Probe entry.
-    /// This grants neither import nor mutation authority.
-
-    /// One exact read after the harness's current-run applied deletion proof.
-    /// Caller retains the actor-validated original CREATE snapshot in memory.
-    /// Development Probe source: use already committed exact collection routes.
-    /// No principal, home or account collection discovery is performed.
-    /// Tokens are observations for explicit non-promoting Probe comparisons;
-    /// the normal partial-pair stage deliberately continues to publish None.
 
     fn scoped_context(&self) -> Result<AdapterAccountContext, ProviderReadError> {
         let mut context = self.context.clone();
@@ -970,193 +824,10 @@ fn parse_discovery_relaxed(bytes: &[u8]) -> Result<Discovery, ProviderReadError>
     Ok(result)
 }
 
-#[derive(Default)]
-struct DiscoveryShape {
-    responses: u32,
-    propstats: u32,
-    statuses: u32,
-    principal_properties: u32,
-    home_properties: u32,
-    malformed: bool,
-}
 
-fn discovery_shape(bytes: &[u8]) -> DiscoveryShape {
-    let mut reader = Reader::from_reader(bytes);
-    let mut shape = DiscoveryShape::default();
-    loop {
-        match reader.read_event() {
-            Ok(Event::Start(event)) | Ok(Event::Empty(event)) => {
-                let Ok(name) = local_name(event.local_name().as_ref()) else {
-                    shape.malformed = true;
-                    break;
-                };
-                match name.as_str() {
-                    "response" => shape.responses = shape.responses.saturating_add(1),
-                    "propstat" => shape.propstats = shape.propstats.saturating_add(1),
-                    "status" => shape.statuses = shape.statuses.saturating_add(1),
-                    "current-user-principal" | "principal-URL" => {
-                        shape.principal_properties = shape.principal_properties.saturating_add(1);
-                    }
-                    "calendar-home-set" => {
-                        shape.home_properties = shape.home_properties.saturating_add(1);
-                    }
-                    _ => {}
-                }
-            }
-            Ok(Event::Eof) => break,
-            Err(_) => {
-                shape.malformed = true;
-                break;
-            }
-            _ => {}
-        }
-    }
-    shape
-}
 
-#[derive(Default)]
-struct CalendarShape {
-    responses: u32,
-    propstats: u32,
-    statuses: u32,
-    hrefs: u32,
-    calendars: u32,
-    supported_components: u32,
-    privileges: u32,
-    display_names: u32,
-    colors: u32,
-    successful_propstats: u32,
-    failed_propstats: u32,
-    failed_resourcetypes: u32,
-    failed_supported_components: u32,
-    failed_privilege_sets: u32,
-    failed_display_names: u32,
-    failed_colors: u32,
-    malformed: bool,
-}
 
-fn calendar_shape(bytes: &[u8]) -> CalendarShape {
-    let mut reader = Reader::from_reader(bytes);
-    reader.config_mut().trim_text(true);
-    let mut shape = CalendarShape::default();
-    let mut stack = Vec::<String>::new();
-    let mut propstat_status = None;
-    let mut propstat_properties = [false; 5];
-    loop {
-        match reader.read_event() {
-            Ok(Event::Start(event)) => {
-                let Ok(name) = local_name(event.local_name().as_ref()) else {
-                    shape.malformed = true;
-                    break;
-                };
-                let counter = match name.as_str() {
-                    "response" => Some(&mut shape.responses),
-                    "propstat" => Some(&mut shape.propstats),
-                    "status" => Some(&mut shape.statuses),
-                    "href" => Some(&mut shape.hrefs),
-                    "calendar" => Some(&mut shape.calendars),
-                    "supported-calendar-component-set" => Some(&mut shape.supported_components),
-                    "privilege" => Some(&mut shape.privileges),
-                    "displayname" => Some(&mut shape.display_names),
-                    "calendar-color" => Some(&mut shape.colors),
-                    _ => None,
-                };
-                if let Some(counter) = counter {
-                    *counter = counter.saturating_add(1);
-                }
-                if name == "propstat" {
-                    propstat_status = None;
-                    propstat_properties = [false; 5];
-                } else if stack.iter().any(|part| part == "propstat") {
-                    mark_calendar_shape_property(&name, &mut propstat_properties);
-                }
-                stack.push(name);
-            }
-            Ok(Event::Empty(event)) => {
-                let Ok(name) = local_name(event.local_name().as_ref()) else {
-                    shape.malformed = true;
-                    break;
-                };
-                let counter = match name.as_str() {
-                    "response" => Some(&mut shape.responses),
-                    "propstat" => Some(&mut shape.propstats),
-                    "status" => Some(&mut shape.statuses),
-                    "href" => Some(&mut shape.hrefs),
-                    "calendar" => Some(&mut shape.calendars),
-                    "supported-calendar-component-set" => Some(&mut shape.supported_components),
-                    "privilege" => Some(&mut shape.privileges),
-                    "displayname" => Some(&mut shape.display_names),
-                    "calendar-color" => Some(&mut shape.colors),
-                    _ => None,
-                };
-                if let Some(counter) = counter {
-                    *counter = counter.saturating_add(1);
-                }
-                if stack.iter().any(|part| part == "propstat") {
-                    mark_calendar_shape_property(&name, &mut propstat_properties);
-                }
-            }
-            Ok(Event::Text(text)) if stack.last().is_some_and(|name| name == "status") => {
-                if stack
-                    .iter()
-                    .rev()
-                    .nth(1)
-                    .is_some_and(|name| name == "propstat")
-                {
-                    let value = text.xml_content(XmlVersion::Implicit1_0).into_owned();
-                    propstat_status = Some(dav_status_code(&value));
-                }
-            }
-            Ok(Event::End(event)) => {
-                let Ok(name) = local_name(event.local_name().as_ref()) else {
-                    shape.malformed = true;
-                    break;
-                };
-                if name == "propstat" {
-                    if propstat_status == Some(200) {
-                        shape.successful_propstats = shape.successful_propstats.saturating_add(1);
-                    } else {
-                        shape.failed_propstats = shape.failed_propstats.saturating_add(1);
-                        let counters = [
-                            &mut shape.failed_resourcetypes,
-                            &mut shape.failed_supported_components,
-                            &mut shape.failed_privilege_sets,
-                            &mut shape.failed_display_names,
-                            &mut shape.failed_colors,
-                        ];
-                        for (present, counter) in propstat_properties.into_iter().zip(counters) {
-                            if present {
-                                *counter = counter.saturating_add(1);
-                            }
-                        }
-                    }
-                }
-                stack.pop();
-            }
-            Ok(Event::Eof) => break,
-            Err(_) => {
-                shape.malformed = true;
-                break;
-            }
-            _ => {}
-        }
-    }
-    shape
-}
 
-fn mark_calendar_shape_property(name: &str, properties: &mut [bool; 5]) {
-    let index = match name {
-        "resourcetype" => Some(0),
-        "supported-calendar-component-set" => Some(1),
-        "current-user-privilege-set" => Some(2),
-        "displayname" => Some(3),
-        "calendar-color" => Some(4),
-        _ => None,
-    };
-    if let Some(index) = index {
-        properties[index] = true;
-    }
-}
 
 fn parse_discovery_document(bytes: &[u8]) -> Result<Discovery, ProviderReadError> {
     let mut reader = Reader::from_reader(bytes);
@@ -1287,7 +958,6 @@ fn parse_calendars(bytes: &[u8]) -> Result<Vec<DiscoveredCalendar>, ProviderRead
 
 struct CalendarParseFailure {
     class: ProviderReadError,
-    checkpoint: &'static str,
 }
 
 fn parse_calendars_detailed(bytes: &[u8]) -> Result<Vec<DiscoveredCalendar>, CalendarParseFailure> {
@@ -1295,7 +965,6 @@ fn parse_calendars_detailed(bytes: &[u8]) -> Result<Vec<DiscoveredCalendar>, Cal
         ($class:expr, $checkpoint:literal) => {
             return Err(CalendarParseFailure {
                 class: $class,
-                checkpoint: $checkpoint,
             })
         };
     }
@@ -1319,7 +988,6 @@ fn parse_calendars_detailed(bytes: &[u8]) -> Result<Vec<DiscoveredCalendar>, Cal
                 let name = local_name(event.local_name().as_ref()).map_err(|class| {
                     CalendarParseFailure {
                         class,
-                        checkpoint: "start_name",
                     }
                 })?;
                 saw_multistatus |= name == "multistatus";
@@ -1352,7 +1020,6 @@ fn parse_calendars_detailed(bytes: &[u8]) -> Result<Vec<DiscoveredCalendar>, Cal
                     for attribute in event.attributes() {
                         let attribute = attribute.map_err(|_| CalendarParseFailure {
                             class: ProviderReadError::UnsafeData,
-                            checkpoint: "component_attribute",
                         })?;
                         if attribute.key.local_name().as_ref() == "name"
                             && attribute.value.as_ref().eq_ignore_ascii_case("VEVENT")
@@ -1383,7 +1050,6 @@ fn parse_calendars_detailed(bytes: &[u8]) -> Result<Vec<DiscoveredCalendar>, Cal
                 let name = local_name(event.local_name().as_ref()).map_err(|class| {
                     CalendarParseFailure {
                         class,
-                        checkpoint: "empty_name",
                     }
                 })?;
                 if matches!(
@@ -1405,7 +1071,6 @@ fn parse_calendars_detailed(bytes: &[u8]) -> Result<Vec<DiscoveredCalendar>, Cal
                     for attribute in event.attributes() {
                         let attribute = attribute.map_err(|_| CalendarParseFailure {
                             class: ProviderReadError::UnsafeData,
-                            checkpoint: "empty_component_attribute",
                         })?;
                         if attribute.key.local_name().as_ref() == "name"
                             && attribute.value.as_ref().eq_ignore_ascii_case("VEVENT")
@@ -1435,7 +1100,6 @@ fn parse_calendars_detailed(bytes: &[u8]) -> Result<Vec<DiscoveredCalendar>, Cal
                 let name = local_name(event.local_name().as_ref()).map_err(|class| {
                     CalendarParseFailure {
                         class,
-                        checkpoint: "end_name",
                     }
                 })?;
                 closed_multistatus |= name == "multistatus";
@@ -1446,7 +1110,6 @@ fn parse_calendars_detailed(bytes: &[u8]) -> Result<Vec<DiscoveredCalendar>, Cal
                             merge_calendar_propstat(calendar, &mut propstat).map_err(|class| {
                                 CalendarParseFailure {
                                     class,
-                                    checkpoint: "successful_propstat_merge",
                                 }
                             })?;
                         }

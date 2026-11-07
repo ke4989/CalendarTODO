@@ -68,9 +68,6 @@ impl ReminderRuntime {
         Self::build(database, clock, delivery, true)
     }
 
-    /// Retain the real scheduling owner for scoped CRUD composition without
-    /// claiming or delivering any user's reminder jobs during a dev Probe run.
-
     fn build(
         database: Database,
         clock: Arc<dyn Clock>,

@@ -747,7 +747,6 @@ impl RemoteMutationRuntime {
         *current = Some(emitter);
         Ok(())
     }
-
     pub(crate) fn bind_production_schedule_port(
         &self,
         lifecycle: &ClosedMutationLifecycle,
@@ -820,7 +819,6 @@ impl RemoteMutationRuntime {
                     .is_some_and(|issued| Weak::ptr_eq(issued, &Arc::downgrade(services)))
             });
         if !same_collection {
-            #[cfg(not(test))]
             return Err(());
             // Synthetic handoff fixtures exercise lifecycle ordering only.
         }

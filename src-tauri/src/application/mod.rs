@@ -1,6 +1,7 @@
 pub mod account_profiles;
 pub mod account_registry;
 pub mod agenda;
+pub(crate) mod agenda_presentation;
 pub mod attachment_runtime;
 pub mod calendar_display_selection;
 pub mod credentials;

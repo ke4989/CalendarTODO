@@ -403,9 +403,7 @@ pub struct HttpDavExecutor {
 }
 
 // Minted only after the exact reviewed exchange and its return guard succeed.
-
 impl HttpDavExecutor {
-    /// A private consuming exact Probe metadata capability, never generic read.
     #[allow(dead_code)]
     pub(crate) fn execute_creation_guarded(
         &self,
@@ -708,7 +706,6 @@ impl ReqwestDavExchange {
             HttpRequestMethod::ConditionalPut
             | HttpRequestMethod::ConditionalCreate
             | HttpRequestMethod::ConditionalDelete => true,
-
             _ => false,
         };
         if !allowed {
@@ -871,7 +868,6 @@ fn method(method: HttpRequestMethod) -> Result<Method, DavExecutionError> {
             Method::from_bytes(b"REPORT").map_err(|_| DavExecutionError::InvalidRequest)
         }
         HttpRequestMethod::ConditionalPut | HttpRequestMethod::ConditionalCreate => Ok(Method::PUT),
-
         HttpRequestMethod::ConditionalDelete => Ok(Method::DELETE),
     }
 }

@@ -2,7 +2,7 @@
 
 # Install Calendar TODO on Windows
 
-Calendar TODO v0.1.1 targets Windows x64 and requires **Microsoft Edge WebView2 Runtime**. Availability on every Windows 10 or Windows 11 device is not guaranteed. Installing Microsoft Edge alone is not a reliable way to confirm that the required WebView2 Runtime is available.
+Calendar TODO v0.1.2 targets Windows x64 and requires **Microsoft Edge WebView2 Runtime**. Availability on every Windows 10 or Windows 11 device is not guaranteed. Installing Microsoft Edge alone is not a reliable way to confirm that the required WebView2 Runtime is available.
 
 ## Before installation
 
@@ -10,12 +10,12 @@ Calendar TODO v0.1.1 targets Windows x64 and requires **Microsoft Edge WebView2 
 2. Compare the installer's SHA-256 with the matching release record. For example, run this PowerShell command and compare the result with the entry for that filename in `SHA256SUMS.txt`; substitute the MSI filename if needed:
 
    ```powershell
-   Get-FileHash -LiteralPath '.\Calendar TODO_0.1.1_x64-setup.exe' -Algorithm SHA256
+   Get-FileHash -LiteralPath '.\Calendar TODO_0.1.2_x64-setup.exe' -Algorithm SHA256
    ```
 
 3. Ensure Microsoft Edge WebView2 Runtime is installed. If it is missing, go to [Microsoft's official WebView2 page](https://developer.microsoft.com/en-us/microsoft-edge/webview2/), follow Microsoft's Runtime installation instructions and review the terms Microsoft presents. Managed devices may require an administrator or your organization's IT support.
 
-Calendar TODO's v0.1.1 NSIS and MSI installers skip WebView2 installation. They do not download, mirror, bundle or execute the Runtime installer or bootstrapper. Calendar TODO does not supply replacement Microsoft license text or assert that you have accepted Microsoft's terms. Microsoft's installation and servicing processes are separate from this application's installer.
+Calendar TODO's v0.1.2 NSIS and MSI installers skip WebView2 installation. The project does not supply replacement Microsoft license text or claim that you have accepted Microsoft's terms. Runtime installation and servicing are handled independently by Microsoft.
 
 ## Install and start
 
@@ -39,7 +39,7 @@ Removing Calendar TODO is separate from removing Microsoft Edge WebView2 Runtime
 
 Calendar TODO application updates require manual download and installation. WebView2 Runtime can receive Microsoft's independent updates under Microsoft's terms and policies. See [PRIVACY.md](PRIVACY.md).
 
-Read the full offline texts in Settings → About & Support → Open-source Licenses & Third-party Notices, or in the installer before installation. No additional license TXT files are installed. The release also provides LICENSE, MICROSOFT_COMPONENT_TERMS.txt and THIRD_PARTY_NOTICES.txt. The [source texts](../src/lib/legal/) are the canonical content shared by the app and installers. If you redistribute the installers, retain the matching `CalendarTODO-installer-sources-0.1.1.zip` and applicable licenses alongside them at the same distribution location without additional charge. The project MIT license does not replace third-party terms or Microsoft's platform conditions.
+Read the full offline texts in Settings → About & Support → Open-source Licenses & Third-party Notices, or in the installer before installation. No additional license TXT files are installed. The release also provides LICENSE, MICROSOFT_COMPONENT_TERMS.txt and THIRD_PARTY_NOTICES.txt. If you redistribute the installers, retain the full notices and the matching `CalendarTODO-installer-sources-0.1.2.zip` at the same download location free of charge, and fulfill the downstream consent requirements for Microsoft code.
 
 [README](../README.en.md) · [简体中文安装指南](INSTALL.md) · [Privacy](PRIVACY.md) · [Third-party notices](THIRD_PARTY_NOTICES.md)
 
@@ -50,10 +50,10 @@ These installers are not code-signed. Unattended deployment, same-version and cr
 Review all offline terms in `src-tauri/installer/LICENSES.txt` or the matching release attachments before deployment. A silent flag is not agreement. Use these explicit parameters only after agreement:
 
 ```powershell
-& '.\Calendar TODO_0.1.1_x64-setup.exe' /S /ACCEPTTERMS=1
-msiexec.exe /i '.\Calendar TODO_0.1.1_x64_en-US.msi' /qn CT_ACCEPT_TERMS=1
+& '.\Calendar TODO_0.1.2_x64-setup.exe' /S /ACCEPTTERMS=1
+msiexec.exe /i '.\Calendar TODO_0.1.2_x64_en-US.msi' /qn CT_ACCEPT_TERMS=1
 # Explicit repair: same consent requirement
-msiexec.exe /fa '.\Calendar TODO_0.1.1_x64_en-US.msi' /qn CT_ACCEPT_TERMS=1
+msiexec.exe /fa '.\Calendar TODO_0.1.2_x64_en-US.msi' /qn CT_ACCEPT_TERMS=1
 ```
 
 NSIS `/P` and `/UPDATE` also require `/ACCEPTTERMS=1`. Missing acceptance refuses unattended installation before product writes. MSI `/qn` and passive execution require `CT_ACCEPT_TERMS=1`, including repair. Use the zh-CN MSI for Chinese Windows Installer UI. Neither package stores a persistent acceptance record. Windows Installer's normal deployment logs may record command-line properties. Complete uninstall (`REMOVE=ALL` or normal `/x`) requires no acceptance parameter. Do not mistake installation of the app for installation or acceptance of the separately supplied WebView2 Runtime.

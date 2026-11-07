@@ -762,9 +762,6 @@ impl ProductionMutationSessions {
         )
     }
 
-    /// Read-only joint check against this owner's exact captured concrete session.
-    /// No registration, authentication, executor entry or request is performed.
-
     pub(crate) fn revoke(&self, account_id: &str) -> bool {
         let mut sessions = match self.sessions.lock() {
             Ok(sessions) => sessions,

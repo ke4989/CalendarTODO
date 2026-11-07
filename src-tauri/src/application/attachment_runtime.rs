@@ -22,7 +22,6 @@ use std::{
 pub const ATTACHMENT_STATE_EVENT: &str = "calendar-todo://attachment-state";
 
 // Lifecycle registration only. No ordinary discovery, reads, sync or deadlines.
-
 /// Weak, execution-free metadata for one exact captured attachment/session.
 #[derive(Clone)]
 pub(crate) struct ConflictAttachmentOwner {
@@ -88,7 +87,6 @@ impl ConflictAttachmentOwner {
                 .registry
                 .is_current_attachment(&self.account, self.generation)
     }
-    /// Dedicated short gate check; never retain the attachment lock over I/O.
     pub(crate) fn matches_gate(&self, gate: &ClosedCompositionGate<'_>) -> bool {
         std::sync::Weak::ptr_eq(&self.runtime, &Arc::downgrade(&gate.attachments().inner))
     }

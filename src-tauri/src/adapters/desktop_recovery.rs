@@ -6,6 +6,9 @@ pub(super) enum Signal {
     ShellCloaked,
     Uncloaked,
     OtherForeground,
+    /// A withdrawing foreground or an idle Shell staging helper. It only asks
+    /// for one restricted look at the list; it never joins an active episode.
+    Observe,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Action {
@@ -23,6 +26,9 @@ pub(crate) struct Request {
     pub episode: u64,
     pub attempt: u8,
     pub action: Action,
+    /// Restricted observation episode: the executor acts only on a list that is
+    /// healthy, positively below the desktop surface and not covered.
+    pub observation: bool,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Effect {
@@ -45,6 +51,7 @@ pub(super) struct Recovery {
     episode: u64,
     attempt: u8,
     phase: Phase,
+    observation: bool,
 }
 impl Recovery {
     pub fn new() -> Self {
@@ -53,13 +60,22 @@ impl Recovery {
             episode: 0,
             attempt: 0,
             phase: Phase::Idle,
+            observation: false,
         }
     }
     pub fn cancel(&mut self, generation: u64) -> Effect {
         self.generation = generation;
         self.phase = Phase::Idle;
+        self.observation = false;
         self.episode += 1;
         Effect::Stop
+    }
+    fn begin(&mut self, observation: bool) -> Effect {
+        self.episode += 1;
+        self.attempt = 0;
+        self.phase = Phase::Pending;
+        self.observation = observation;
+        Effect::Arm
     }
     pub fn signal(&mut self, signal: Signal, generation: u64) -> Effect {
         if self.generation != generation {
@@ -73,6 +89,28 @@ impl Recovery {
         if signal == Signal::Uncloaked {
             return Effect::None;
         }
+        if signal == Signal::Observe {
+            return match self.phase {
+                Phase::Idle | Phase::Settled(_) => self.begin(true),
+                _ => Effect::None,
+            };
+        }
+        // Only a real desktop foreground or minimize removes the observation
+        // restriction. A cloak echo never does, so it cannot give a denied or
+        // exhausted observation full repair authority.
+        if self.observation && matches!(signal, Signal::DesktopForeground | Signal::Minimized) {
+            match self.phase {
+                Phase::Pending => {
+                    // No request exists yet; the same deadline now runs a normal episode.
+                    self.observation = false;
+                    return Effect::None;
+                }
+                // The one case where an active episode restarts: the in-flight
+                // restricted request fails the equality guard in `completed`.
+                Phase::Executing(_) | Phase::Verifying => return self.begin(false),
+                _ => {}
+            }
+        }
         match self.phase {
             Phase::Idle => {}
             // A verified success may be followed by the next real cloak
@@ -83,10 +121,7 @@ impl Recovery {
             Phase::Settled(_) => {}
             _ => return Effect::None,
         }
-        self.episode += 1;
-        self.attempt = 0;
-        self.phase = Phase::Pending;
-        Effect::Arm
+        self.begin(false)
     }
     fn request(&self, action: Action) -> Request {
         Request {
@@ -94,6 +129,7 @@ impl Recovery {
             episode: self.episode,
             attempt: self.attempt,
             action,
+            observation: self.observation,
         }
     }
     pub fn deadline(&mut self) -> Effect {
@@ -116,10 +152,23 @@ impl Recovery {
             return Effect::None;
         }
         let Some(healthy) = healthy else {
-            self.phase = Phase::Settled(false);
+            // A denied observation is not a failed settlement: a later real
+            // cloak or foreground transition must still be able to start.
+            self.phase = if self.observation {
+                Phase::Idle
+            } else {
+                Phase::Settled(false)
+            };
+            self.observation = false;
             return Effect::Stop;
         };
         if request.action == Action::Prepare {
+            if self.observation && healthy {
+                // A healthy observation gets one more look after 220 ms, covering
+                // the A scenario where the flip may happen after the first Prepare.
+                self.phase = Phase::Verifying;
+                return Effect::Arm;
+            }
             let next = if healthy {
                 Action::Restore
             } else {
@@ -134,8 +183,9 @@ impl Recovery {
             self.phase = Phase::Verifying;
             return Effect::Arm;
         }
-        if healthy || self.attempt == 2 {
+        if healthy || self.attempt == 2 || self.observation {
             self.phase = Phase::Settled(healthy);
+            self.observation = false;
             Effect::Stop
         } else {
             self.attempt += 1;

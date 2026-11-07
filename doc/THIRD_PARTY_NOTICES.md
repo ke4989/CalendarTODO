@@ -31,7 +31,7 @@ The development and design tools acknowledged in the README are not bundled in t
 | WiX 3.14.1 installer components | MS-RL terms and applicable source obligations are retained |
 | Microsoft WebView2 SDK static loader | Full BSD-3-Clause license and exact SDK package NOTICE are retained; package-wide NOTICE references do not imply every named assembly is bundled |
 
-Installer redistribution must include the matching `CalendarTODO-installer-sources-0.1.1.zip` at the same download location, at no additional charge. That companion supplies exact installer-component sources, applicable licenses, generated installer inputs and component correspondence, as well as the application build source. Calendar TODO offers no differing terms for covered installer components. See the [installation guide](INSTALL.en.md#updates-and-notices).
+Installer redistribution must include the matching `CalendarTODO-installer-sources-0.1.2.zip` at the same download location, at no additional charge. That companion supplies exact installer-component sources, applicable licenses, generated installer inputs and component correspondence, as well as the application build source. Calendar TODO offers no differing terms for covered installer components. See the [installation guide](INSTALL.en.md#updates-and-notices).
 
 ## Separate Microsoft components
 

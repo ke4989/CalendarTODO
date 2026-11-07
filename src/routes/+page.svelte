@@ -25,6 +25,10 @@
   import { applyRemoteDraft, draftRequest, initialDraft, selectedBase, resolveBackgroundConflict, retryBackgroundRemoteWrite, startBackgroundRemoteWrite, utcInput, projectionCandidate, preparationHint, type PreparationState, type RemoteDraft } from "$lib/ui/remote-crud-preparation";
   import { applyTheme } from "$lib/theme/apply";
   import { confirmedRemoteEvent, listenConfirmedEvent, getCalendarDisplaySelection, setCalendarDisplaySelection, calendarDisplaySelectionEvent } from "$lib/ipc/client";
+  import PresentedCreates from "$lib/components/PresentedCreates.svelte";
+  import { AgendaPresentation, emptyPresentation, presentedCalendars, visibleCreates, deleteHidden, createDestinationVisible } from "$lib/ui/agenda-presentation";
+  import { beginPresentedCreate, stagePresentedRemoteDelete, undoPresentedRemoteDelete, retryPresentedCreateMetadata } from "$lib/ipc/client";
+  import type { AgendaPresentationSnapshot, PresentedCreate, PresentedIdentity } from "$lib/ipc/contracts";
   import SearchWorkspace from "$lib/components/SearchWorkspace.svelte";
   import { searchWorkspaceDetail, searchRemoteDetail, type SearchSummary } from "$lib/ipc/search-workspace";
   import { fitOneLine } from "$lib/ui/fit-one-line";
@@ -44,9 +48,23 @@
   } from "$lib/ipc/client";
   import type { CalendarDisplaySelection, AgendaRefreshNotice, AppLanguage, AppSettings, AttachmentView, BootstrapState, CalendarAgendaItem, CalendarCompletionChanged, CalendarSettingsView, ColorMode, ConflictResolutionChoice, IpcError, LocalCalendar, LocalTodo, LocalTodoCompletionChanged, MutationApplicationView, Priority, RecurrenceFrequency, RecurrenceOptions, RuntimeAccountProfile, SyncExecutionView, ThemePalette, WindowMode } from "$lib/ipc/contracts";
 
+  let presentation = $state<AgendaPresentationSnapshot>(emptyPresentation());
+  let createRecovery = $state<PresentedIdentity | null>(null);
+  let presentationReadReady = $state(false);
+  const presenter = new AgendaPresentation("main", snapshot => {
+    presentation = snapshot;
+    calendarItems = presentedCalendars(calendarItems, snapshot);
+    void Promise.all([refreshCalendar(), refresh()]).catch(() => showActionToast(translate(language, "listRefreshFailed"), "error"));
+  }, (action, failed) => showActionToast(failed ? text("actionFailedSeeLog", { action: translate(language, action) }) : withoutTerminalPunctuation(text("actionSucceeded", { action: translate(language, action) })), failed ? "error" : "success"), () => showActionToast(translate(language, "listRefreshFailed"), "error"));
+  $effect(() => {
+    const excluded = presentationReadReady && calendarSelectionReady ? new Set(presentation.creates.filter(c => !createDestinationVisible(c, visibleLocalCalendars, remoteDestinations, hiddenCalendarFilters)).map(c => c.presentationId)) : new Set<string>();
+    presenter.reconcile(todos, calendarItems, excluded);
+  });
+  onDestroy(() => presenter.dispose());
   let bootstrap = $state<BootstrapState | null>(null);
   let todos = $state<LocalTodo[]>([]);
   let calendarItems = $state<CalendarAgendaItem[]>([]);
+  const createRows = $derived.by(() => visibleCreates(presentation, todos, calendarItems, "main").filter(c => createDestinationVisible(c, visibleLocalCalendars, remoteDestinations, hiddenCalendarFilters)));
   const tagSuggestions = $derived(collectTagSuggestions([...todos, ...calendarItems]));
   let calendarSettings = $state<CalendarSettingsView[]>([]);
   let localCalendars = $state<LocalCalendar[]>([]);
@@ -80,7 +98,7 @@
   }
   function showActionFailure(action: "saveAction" | "deleteAction", reason: string) { void reportActionFailure(action, "localSave", reason); }
   onDestroy(() => { backgroundStops.forEach((stop) => stop()); if (actionToastTimer) clearTimeout(actionToastTimer); detailSessions.forEach((session) => session.saver.dispose()); });
-  function remoteBlockedReason(calendar: CalendarSettingsView | undefined, item?: CalendarAgendaItem) { return item && item.pendingRemote?.kind === "updateEventV3" && item.pendingRemote.status !== "conflict" && item.pendingRemote.status !== "recoveryNeeded" ? remoteCalendarBlockedReason(calendar, attachmentStates) : remoteCalendarBlockedReason(calendar, attachmentStates, item); }
+  function remoteBlockedReason(calendar: CalendarSettingsView | undefined, item?: CalendarAgendaItem) { if (item && deleteHidden(presentation, item.resourceId)) return translate(language, "pendingRemoteSave"); return item && item.pendingRemote?.kind === "updateEventV3" && item.pendingRemote.status !== "conflict" && item.pendingRemote.status !== "recoveryNeeded" ? remoteCalendarBlockedReason(calendar, attachmentStates) : remoteCalendarBlockedReason(calendar, attachmentStates, item); }
   function editorDraft(item: CalendarAgendaItem | undefined, values: { title: string; notes: string; location: string; start: string; end: string }): RemoteDraft {
     const start = fromLocalInput(values.start), end = fromLocalInput(values.end);
     return { ...initialDraft(item), title: values.title, selectTitle: !item || values.title !== item.title, description: values.notes, descriptionAction: !item || values.notes !== (item.notes ?? "") ? values.notes.trim() ? "set" : "clear" : "retain", location: values.location, locationAction: !item || values.location !== (item.location ?? "") ? values.location.trim() ? "set" : "clear" : "retain", selectTime: !item || start !== item.startAtUtcMs || end !== item.endAtUtcMs, start: utcInput(start), end: utcInput(end) };
@@ -103,7 +121,11 @@
       failed: (diagnostic) => { completed = true; terminalFailed = true; backgroundStops.delete(stop); void reportActionFailure(action, "remoteBackgroundSync", diagnostic, true); void refreshCalendar().finally(() => settled?.(false)); },
     });
     if (!result.started) {
-      void reportActionFailure(action, "remoteAdmission", result.message);
+      void reportActionFailure(action, "remoteAdmission", result.diagnostic ?? result.message);
+      if (kind === "updateEventV3") {
+        try { await refreshCalendar(); }
+        catch (failure) { try { await recordUiError("saveAction-event", "agendaRefresh", diagnosticFrom(failure)); } catch { /* Preserve the original admission failure. */ } }
+      }
       return result;
     }
     stop = result.stop;
@@ -156,7 +178,7 @@
     editTitle = values.title; editNotes = values.notes; editLocation = values.location; editStart = values.start; editDue = values.due;
     editImportant = values.important; editTags = [...values.tags]; editRecurrence = values.recurrence; editRecurrenceInterval = values.recurrenceInterval;
   }
-  async function saveRemoteDetails(item: CalendarAgendaItem, closeAfter = false, values = captureRemoteDetailValues(), current = () => true, session?: DetailSession): Promise<boolean> {
+  async function saveRemoteDetails(item: CalendarAgendaItem, closeAfter = () => false, values = captureRemoteDetailValues(), current = () => true, session?: DetailSession): Promise<boolean> {
     if (!values.title.trim() || !Number.isInteger(values.recurrenceInterval) || values.recurrenceInterval < 1 || values.recurrenceInterval > 365) return false;
     const draft = editorDraft(item, { title: values.title, notes: values.notes, location: values.location, start: values.start, end: values.due });
     const remoteChanged = draft.selectTitle || draft.descriptionAction !== "retain" || draft.locationAction !== "retain" || draft.selectTime;
@@ -165,29 +187,60 @@
     if (tagNames.length > 32 || tagNames.some((tag) => Array.from(tag).length > 64)) { errorMessage = translate(language, "tagLimitExceeded"); return false; }
     const recurrence = recurrenceInput(values.recurrence, values.recurrenceInterval, values.options);
     const metadataChanged = tagNames.join("\u0000") !== item.tags.map((tag) => tag.name).join("\u0000") || recurrenceChanged(recurrence, item.recurrence);
-    if (!remoteChanged && !pinChanged && !metadataChanged) { if (closeAfter && current()) detailEditing = false; return true; }
+    if (!remoteChanged && !pinChanged && !metadataChanged) { if (closeAfter() && current()) detailEditing = false; return true; }
     const calendar = calendarSettings.find((calendar) => calendar.calendarId === item.calendarId);
     let remoteRequest: ReturnType<typeof beginRemoteWrite> | null = null;
+    const identity = `calendar:${item.resourceId}:${item.recurrenceKey}`;
+    let admitted = false;
+    let earlySettlement: boolean | undefined;
+    const finishRemoteWrite = (succeeded: boolean) => {
+      if (!admitted) { earlySettlement = succeeded; return; }
+      if (succeeded || !session || detailSessions.get(identity) !== session) return;
+      session.calendar = null;
+      if (activeDetailIdentity === identity) {
+        submittedCalendar = null;
+        detailEditing = false;
+      }
+    };
     if (remoteChanged) {
+      if (draft.selectTime && item.remoteTimeEditEligible === false) {
+        remoteView = { phase: "rejected", message: "", errors: { start: translate(language, "remoteTimeReadOnly") }, receipt: null, operations: [], busy: false };
+        return false;
+      }
       const reason = remoteBlockedReason(calendar, item);
       if (reason || !calendar) { errorMessage = reason ?? translate(language, "calendarUnavailableRefresh"); return false; }
       if (!validateRemoteWrite("updateEventV3", calendar, item, draft)) return false;
       draft.base = selectedBase(item, draft);
       if (pinChanged || metadataChanged) draft.metadata = { resourceId: item.resourceId, tagNames, recurrence, important: pinChanged ? values.important : undefined };
-      remoteRequest = beginRemoteWrite("updateEventV3", calendar, item, draft, "saveAction");
+      remoteRequest = beginRemoteWrite("updateEventV3", calendar, item, draft, "saveAction", finishRemoteWrite);
     }
     if (remoteRequest) {
       const result = await remoteRequest;
       if (!result.started) {
+        const refreshed = calendarItems.find((candidate) => candidate.resourceId === item.resourceId && candidate.recurrenceKey === item.recurrenceKey);
+        if (session && detailSessions.get(identity) === session && refreshed) {
+          // Refresh capability only: retained input still uses its original edited base.
+          session.calendar = { ...(session.calendar ?? item), remoteTimeEditEligible: refreshed.remoteTimeEditEligible };
+          if (activeDetailIdentity === identity) submittedCalendar = session.calendar;
+        }
+        if (session && detailSessions.get(identity) === session && (refreshed?.pendingRemote?.status === "conflict" || refreshed?.pendingRemote?.status === "recoveryNeeded")) {
+          session.calendar = null;
+          if (activeDetailIdentity === identity) {
+            submittedCalendar = null;
+            detailEditing = false;
+          }
+        }
         return false;
       }
       const accepted = { ...applyRemoteDraft(item, draft), important: values.important, tags: tagNames.map((name) => ({ tagId: name, name })), recurrence };
-      if (session) session.calendar = accepted;
+      if (session && current()) session.calendar = accepted;
       if (selectedSearchEntry?.kind === "calendar" && selectedSearchEntry.item.resourceId === item.resourceId && selectedSearchEntry.item.recurrenceKey === item.recurrenceKey) selectedSearchEntry = { kind: "calendar", item: accepted, key: calendarEntryKey(accepted) };
       if (current()) {
         submittedCalendar = accepted;
-        if (closeAfter) detailEditing = false;
+        if (closeAfter()) detailEditing = false;
       }
+      admitted = true;
+      if (earlySettlement !== undefined) finishRemoteWrite(earlySettlement);
       if (!result.terminalFailed) showActionToast(withoutTerminalPunctuation(text("actionSucceeded", { action: translate(language, "saveAction") })), "success");
       return true;
     }
@@ -197,7 +250,7 @@
     if (saved && selectedSearchEntry?.kind === "calendar" && selectedSearchEntry.item.resourceId === item.resourceId && selectedSearchEntry.item.recurrenceKey === item.recurrenceKey) selectedSearchEntry = { kind: "calendar", item: accepted, key: calendarEntryKey(accepted) };
     if (saved && current()) {
       submittedCalendar = accepted;
-      if (closeAfter) detailEditing = false;
+      if (closeAfter()) detailEditing = false;
       showActionToast(withoutTerminalPunctuation(text("actionSucceeded", { action: translate(language, "saveAction") })), "success");
     }
     return saved;
@@ -210,18 +263,13 @@
       } catch (failure) { void reportActionFailure("saveAction", "localMetadata", diagnosticFrom(failure)); return false; }
     }
   }
-  async function commitRemoteDeletion(item: CalendarAgendaItem, calendar: CalendarSettingsView) {
-    const draft = { ...initialDraft(item), confirmed: true };
-    const result = await beginRemoteWrite("delete", calendar, item, draft, "deleteAction", () => finishStagedRemoteDeletion(item));
-    finishStagedRemoteDeletion(item);
-  }
   async function removeRemoteEvent(item: CalendarAgendaItem) {
     const calendar = calendarSettings.find((calendar) => calendar.calendarId === item.calendarId);
     const reason = remoteBlockedReason(calendar, item);
     if (reason || !calendar || item.pendingRemote || detailSessions.get(`calendar:${item.resourceId}:${item.recurrenceKey}`)?.saver.pending) { errorMessage = reason ?? translate(language, "pendingRemoteSave"); return; }
     const draft = { ...initialDraft(item), confirmed: true };
     if (!validateRemoteWrite("delete", calendar, item, draft)) return;
-    stageRemoteDeletion(item, calendar);
+    if (!await stageRemoteDeletion(item)) return;
     if (detailModal === "calendar" && selectedCalendarResourceId === item.resourceId) { cancelQueuedDetailSave(); detailModal = null; detailEditing = false; }
   }
   $effect(() => { if (!createModal && detailModal !== "calendar") resetRemoteEditor(); });
@@ -465,14 +513,11 @@
   let errorLogAvailable = $state(false);
   type UndoDeletion =
     | { kind: "local"; id: string; title: string; calendarId: string }
-    | { kind: "localOccurrence"; id: string; occurrenceKey: string; title: string; calendarId: string }
-    | { kind: "remote"; id: string; title: string; item: CalendarAgendaItem; calendar: CalendarSettingsView };
+    | { kind: "localOccurrence"; id: string; occurrenceKey: string; title: string; calendarId: string };
   let undoItems = $state<UndoEntry<UndoDeletion>[]>([]);
-  const undoQueue = new DeletionUndoQueue<UndoDeletion>((entries) => undoItems = entries, (item) => {
-    if (item.kind === "remote") void commitRemoteDeletion(item.item, item.calendar);
-  });
+  const undoQueue = new DeletionUndoQueue<UndoDeletion>((entries) => undoItems = entries, () => {});
   onDestroy(() => undoQueue.dispose());
-  let stagedRemoteDeleteKeys = $state<Set<string>>(new Set());
+  const stagedRemoteDeleteKeys = $derived(new Set(presentation.remoteDeletes.filter(d => d.phase === "undoable" || d.phase === "admitting").map(d => remoteDeleteKey(d.item))));
   let editingId = $state<string | null>(null);
   let editTitle = $state("");
   let editNotes = $state("");
@@ -495,6 +540,7 @@
   const pendingCount = $derived(todos.filter((todo) => !todo.completed).length + calendarItems.filter((item) => item.status === "ready" && !item.completed).length);
 
   onMount(() => {
+    void presenter.start();
     void getAppVersion().then((value) => appVersion = value);
     const updateTimer = setTimeout(() => { void checkAboutUpdate(false); }, 3_000);
     const clockTimer = setInterval(() => { currentTime = Date.now(); }, 30_000);
@@ -557,15 +603,18 @@
   });
 
   async function load() {
+    const localRevision = ++localReadRevision, calendarRevision = ++calendarReadRevision;
     loading = true; errorMessage = "";
     try {
       const loaded = await Promise.all([getBootstrapState(), listLocalTodos(), listCalendarAgendaItems(), listCalendarSettings(), getAppSettings(), listAccountProfiles(), listAccountSyncStates(), listAttachmentStates(), getDesktopItemOrder(), listLocalCalendars()]);
-      [bootstrap, todos, calendarItems, calendarSettings, settings, accounts] = loaded;
+      [bootstrap, , , calendarSettings, settings, accounts] = loaded;
+      if (localRevision === localReadRevision) todos = loaded[1];
+      if (calendarRevision === calendarReadRevision) calendarItems = presentedCalendars(loaded[2], presentation);
       selectedSettingsAccountId = accounts[0]?.accountId ?? "local";
       syncStates = new Map(loaded[6].map((state) => [state.accountId, state]));
       attachmentStates = new Map(loaded[7].map((state) => [state.accountId, state]));
       mutationViews = new Map((await Promise.all(accounts.map((account) => getRemoteMutationView(account.accountId)))).map((view) => [view.accountId, view]));
-      itemOrder = loaded[8]; localCalendars = loaded[9]; selectedSettingsCalendarId = null; createCalendarId = preferredCreateCalendarId(); const initialStart = Date.now(); createStart = toLocalInput(initialStart); createDue = toLocalInput(initialStart + 3_600_000);
+      itemOrder = loaded[8]; localCalendars = loaded[9]; presentationReadReady = true; selectedSettingsCalendarId = null; createCalendarId = preferredCreateCalendarId(); const initialStart = Date.now(); createStart = toLocalInput(initialStart); createDue = toLocalInput(initialStart + 3_600_000);
       settingsLanguage = settings.language; settingsThemePalette = settings.themePalette; settingsColorMode = settings.colorMode; settingsMode = settings.windowMode; settingsSyncInterval = settings.syncIntervalMinutes; settingsSyncOnStartup = settings.syncOnStartup; settingsDesktopOpacity = settings.desktopOpacityPercent; settingsDesktopShowCalendarName = settings.desktopShowCalendarName; settingsDesktopShowTime = settings.desktopShowTime; settingsDesktopShowTags = settings.desktopShowTags; settingsMainShowCalendarName = settings.mainShowCalendarName; settingsMainShowTime = settings.mainShowTime; settingsMainShowTags = settings.mainShowTags; settingsStartHiddenInTray = settings.startHiddenInTray; settingsLaunchAtLogin = settings.launchAtLogin; settingsLocalTodoColor = settings.localTodoColor; settingsLocalDisplayPastDays = settings.localDisplayPastDays ?? undefined; settingsLocalDisplayFutureDays = settings.localDisplayFutureDays ?? undefined; settingsDefaultCalendarId = settings.defaultCalendarId ?? preferredCreateCalendarId(); settingsReminderNotifications = settings.reminderNotificationsEnabled;
     }
     catch (error) { errorMessage = messageFrom(error, translate(language, "agendaLoadFailed")); }
@@ -581,7 +630,7 @@
     if (revision !== localCalendarReadRevision) return;
     localCalendars = loaded;
     const valid = new Set(localCalendars.map((calendar) => calendar.calendarId));
-    undoQueue.removeWhere((item) => item.kind !== "remote" && !valid.has(item.calendarId));
+    undoQueue.removeWhere((item) => !valid.has(item.calendarId));
     if (selectedSettingsAccountId === "local" && selectedSettingsCalendarId && !valid.has(selectedSettingsCalendarId)) selectedSettingsCalendarId = null;
     for (const [identity, session] of detailSessions) {
       const todo = session.todo ?? session.saver.snapshot?.todo;
@@ -613,7 +662,8 @@
     finally { localCalendarDeleteBusy = false; }
   }
   function remoteDeleteKey(item: CalendarAgendaItem): string { return `${item.seriesId}:${item.recurrenceKey}`; }
-  async function refreshCalendar() { calendarItems = (await listCalendarAgendaItems()).filter((item) => !stagedRemoteDeleteKeys.has(remoteDeleteKey(item))); }
+  let calendarReadRevision = 0;
+  async function refreshCalendar() { const revision = ++calendarReadRevision; const items = await listCalendarAgendaItems(); if (revision === calendarReadRevision) calendarItems = presentedCalendars(items, presentation); }
   async function refreshCalendarSettings() { calendarSettings = await listCalendarSettings(); }
   async function saveCalendarColor(calendarId: string, color: string | null) {
     clearMessages();
@@ -693,7 +743,7 @@
   async function openCreateModal() {
     if (submitting || !leaveDetail()) return;
     detailEditing = false; detailModal = null;
-    resetRemoteEditor();
+    resetRemoteEditor(); createRecovery = null;
     const initialStart = Date.now(); title = ""; priority = "normal"; createStart = toLocalInput(initialStart); createDue = toLocalInput(initialStart + 3_600_000); createDueEdited = false; createCalendarId = preferredCreateCalendarId(); createNotes = ""; createLocation = ""; createImportant = false; createTags = []; createRecurrence = "none"; createInterval = 1; createRecurrenceOptions = defaultRecurrenceOptions();
     createModal = true; clearMessages();
     await tick(); createTitleInput?.focus();
@@ -1108,80 +1158,43 @@
 
   async function create(event: SubmitEvent) {
     event.preventDefault();
-    if (submitting) return;
-    submitting = true;
-    try {
+    if (submitting || !createModal) return;
     updateCreateStart(createStart);
-    const tagNames = createTags;
-    const pinAtSubmit = createImportant;
-    if (tagNames.length > 32 || tagNames.some((tag) => Array.from(tag).length > 64)) { errorMessage = translate(language, "tagLimitExceeded"); return; }
-    const recurrence = recurrenceInput(createRecurrence, createInterval, createRecurrenceOptions);
+    const tagNames = [...createTags];
+    if (tagNames.length > 32 || tagNames.some(tag => Array.from(tag).length > 64)) { errorMessage = translate(language, "tagLimitExceeded"); return; }
+    if (!title.trim()) { errorMessage = translate(language, "enterTodoTitle"); return; }
     if (remoteCreateCalendar) {
       const reason = remoteBlockedReason(remoteCreateCalendar);
       if (reason) { errorMessage = reason; return; }
       const draft = editorDraft(undefined, { title, notes: createNotes, location: createLocation, start: createStart, end: createDue });
       if (!validateRemoteWrite("createUtcV2", remoteCreateCalendar, undefined, draft)) return;
-      let createdResourceId = "";
-      let earlySettlement: boolean | undefined;
-      const finishCreate = (succeeded: boolean) => {
-        if (!createdResourceId) { earlySettlement = succeeded; return; }
-        if (!succeeded) return;
-        void (async () => {
-          try {
-            if (tagNames.length || recurrence || pinAtSubmit) {
-              await updateCalendarLocalMetadata({ resourceId: createdResourceId, tagNames, recurrence, important: pinAtSubmit ? true : undefined });
-              await refreshCalendar();
-            }
-          } catch (failure) { void reportActionFailure("saveAction", "localMetadata", diagnosticFrom(failure)); }
-        })();
-      };
-      const request = beginRemoteWrite("createUtcV2", remoteCreateCalendar, undefined, draft, "saveAction", finishCreate);
-      const provisionalId = `optimistic:${crypto.randomUUID()}`;
-      const provisional: CalendarAgendaItem = {
-        seriesId: provisionalId, resourceId: provisionalId, recurrenceKey: "SINGLETON", calendarId: remoteCreateCalendar.calendarId,
-        calendarName: remoteCreateCalendar.displayName, calendarColor: remoteCreateCalendar.effectiveColor,
-        title: title.trim(), notes: createNotes.trim() || null, location: createLocation.trim() || null,
-        startAtUtcMs: fromLocalInput(createStart), endAtUtcMs: fromLocalInput(createDue), allDay: false, status: "ready", unsupportedReason: null,
-        workItemId: null, completed: false, important: pinAtSubmit, tags: tagNames.map((name) => ({ tagId: `optimistic:${name}`, name })), recurrence,
-        subtasks: [], pendingRemote: { operationId: provisionalId, accountId: remoteCreateCalendar.accountId, kind: "createUtcV2", status: "pending" }, remoteEditEligible: false, remoteEditBlockedReason: translate(language, "pendingRemoteSave"), remoteTimeEditEligible: false
-      };
-      calendarItems = [...calendarItems, provisional];
-      const result = await request;
-      calendarItems = calendarItems.filter((item) => item.resourceId !== provisionalId);
-      if (!result.started) { createModal = true; return; }
-      createModal = false;
-      if (result.terminalFailed) return;
-      createdResourceId = result.receipt.resourceId;
-      showActionToast(withoutTerminalPunctuation(text("actionSucceeded", { action: translate(language, "saveAction") })), "success");
-      void refreshCalendar();
-      if (earlySettlement !== undefined) finishCreate(earlySettlement);
-      return;
-    }
-    if (!visibleLocalCalendars.some((calendar) => calendar.calendarId === createCalendarId)) { errorMessage = translate(language, "selectedCalendarUnavailable"); return; }
-    if (!title.trim()) { errorMessage = translate(language, "enterTodoTitle"); return; }
+    } else if (!visibleLocalCalendars.some(calendar => calendar.calendarId === createCalendarId)) { errorMessage = translate(language, "selectedCalendarUnavailable"); return; }
     const startAtUtcMs = fromLocalInput(createStart), dueAtUtcMs = fromLocalInput(createDue);
     if (createRecurrence !== "none" && dueAtUtcMs === null) { errorMessage = translate(language, "recurrenceDueRequiredWithPeriod"); return; }
-    clearMessages();
-    const calendar = visibleLocalCalendars.find((item) => item.calendarId === createCalendarId)!;
-    const optimisticId = `optimistic:${crypto.randomUUID()}`;
-    const optimisticTodo: LocalTodo = {
-      todoId: optimisticId, calendarId: calendar.calendarId, calendarName: calendar.name,
-      calendarColor: calendar.color, workItemId: null, occurrenceKey: "SINGLETON",
-      title: title.trim(), notes: createNotes.trim() || null, location: createLocation.trim() || null,
-      startAtUtcMs, dueAtUtcMs, priority, important: pinAtSubmit, completed: false,
-      recurrence: recurrence ? { seriesId: optimisticId, ...recurrence } : null, backlogCount: 0,
-      tags: tagNames.map((name) => ({ tagId: `optimistic:${name}`, name })), subtasks: [],
-      createdAtMs: Date.now(), updatedAtMs: Date.now(),
-    };
-    todos = [...todos, optimisticTodo];
+    const destination = visibleLocalCalendars.find(calendar => calendar.calendarId === createCalendarId);
+    const input = { calendarName: remoteCreateCalendar?.displayName ?? destination!.name, calendarColor: remoteCreateCalendar?.effectiveColor ?? destination?.color ?? null, source: remoteCreateCalendar ? "remote" as const : "local" as const, recovery: createRecovery ? { ...createRecovery } : null, draft: { todoId: null, calendarId: createCalendarId, title: title.trim(), notes: createNotes.trim() || null, location: createLocation.trim() || null, startAtUtcMs, dueAtUtcMs, priority, important: createImportant, tagNames, recurrence: recurrenceInput(createRecurrence, createInterval, copyRecurrenceOptions(createRecurrenceOptions)) } };
+    submitting = true;
     try {
-      const saved = await saveLocalTodo({ todoId: null, calendarId: createCalendarId, title: title.trim(), notes: createNotes.trim() || null, location: createLocation.trim() || null, startAtUtcMs, dueAtUtcMs, priority, important: pinAtSubmit, tagNames, recurrence });
-      todos = todos.map((item) => item.todoId === optimisticId ? saved : item);
+      presenter.accept(await beginPresentedCreate(input));
       createModal = false;
-      title = ""; priority = "normal";
-      showActionToast(withoutTerminalPunctuation(text("actionSucceeded", { action: translate(language, "saveAction") })), "success");
-    } catch (failure) { todos = todos.filter((item) => item.todoId !== optimisticId); void reportActionFailure("saveAction", "localSave", diagnosticFrom(failure)); }
-    } finally { submitting = false; }
+      createRecovery = null;
+    } catch (failure) { void reportActionFailure("saveAction", "createStage", "creation could not be staged; draft retained"); }
+    finally { submitting = false; }
+  }
+  async function recoverCreate(item: PresentedCreate) {
+    if (item.failure === "localMetadata") {
+      try { presenter.accept(await retryPresentedCreateMetadata({ presentationId: item.presentationId, revision: item.revision })); }
+      catch { void reportActionFailure("saveAction", "localMetadata", "local event metadata recovery could not start"); }
+      return;
+    }
+    if (createModal || submitting || !leaveDetail()) return;
+    await openCreateModal();
+    const d = item.draft;
+    createRecovery = { presentationId: item.presentationId, revision: item.revision };
+    title = d.title; createCalendarId = d.calendarId; createNotes = d.notes ?? ""; createLocation = d.location ?? "";
+    createStart = toLocalInput(d.startAtUtcMs); createDue = toLocalInput(d.dueAtUtcMs); createDueEdited = true;
+    priority = d.priority; createImportant = d.important; createTags = [...d.tagNames];
+    createRecurrence = d.recurrence?.frequency ?? "none"; createInterval = d.recurrence?.interval ?? 1; createRecurrenceOptions = copyRecurrenceOptions(d.recurrence?.options ?? defaultRecurrenceOptions());
   }
   function updateCreateStart(value: string) {
     createStart = value;
@@ -1263,6 +1276,12 @@
     activeDetailIdentity = identity;
     const session = detailSessions.get(identity);
     detailSaving = session?.saver.saving ?? false;
+    const recoveryBlocked = calendarItems.some((item) => `calendar:${item.resourceId}:${item.recurrenceKey}` === identity && (item.pendingRemote?.status === "conflict" || item.pendingRemote?.status === "recoveryNeeded"));
+    if (recoveryBlocked) {
+      if (session) session.calendar = null;
+      submittedTodo = null; submittedCalendar = null; detailEditing = false;
+      return;
+    }
     submittedTodo = session?.todo ?? null; submittedCalendar = session?.calendar ?? null;
     const snapshot = session?.saver.snapshot;
     if (snapshot && (session.saver.dirty || session.saver.pending)) {
@@ -1293,7 +1312,7 @@
     for (const [identity, session] of detailSessions) if (!session.saver.dirty && !session.saver.pending) detailSessions.delete(identity);
     return true;
   }
-  async function saveDetailTodo(snapshot: DetailSnapshot, explicit: boolean, current: () => boolean, session: DetailSession): Promise<boolean> {
+  async function saveDetailTodo(snapshot: DetailSnapshot, explicit: () => boolean, current: () => boolean, session: DetailSession): Promise<boolean> {
     const todo = snapshot.todo!, v = snapshot.values;
     try {
       const saved = await saveLocalTodo({ todoId: todo.todoId, selectedOccurrenceKey: todo.occurrenceKey, calendarId: snapshot.calendarId, title: v.title, notes: v.notes || null, location: v.location || null, startAtUtcMs: fromLocalInput(v.start), dueAtUtcMs: fromLocalInput(v.due), priority: snapshot.priority, important: v.important, tagNames: v.tags, recurrence: recurrenceInput(v.recurrence, v.recurrenceInterval, snapshot.options) });
@@ -1302,7 +1321,7 @@
       if (selectedSearchEntry?.kind === "todo" && selectedSearchEntry.item.todoId === todo.todoId && selectedSearchEntry.item.occurrenceKey === todo.occurrenceKey) selectedSearchEntry = { kind: "todo", item: saved, key: todoEntryKey(saved) };
       if (current()) {
         submittedTodo = saved;
-        if (explicit) { editingId = null; detailEditing = false; }
+        if (explicit()) { editingId = null; detailEditing = false; }
       }
       showActionToast(withoutTerminalPunctuation(text("actionSucceeded", { action: translate(language, "saveAction") })), "success");
       return true;
@@ -1396,11 +1415,6 @@
   async function undoDelete(token: number) {
     const item = undoQueue.undo(token);
     if (!item) return;
-    if (item.kind === "remote") {
-      const next = new Set(stagedRemoteDeleteKeys); next.delete(remoteDeleteKey(item.item)); stagedRemoteDeleteKeys = next;
-      await refreshCalendar();
-      return;
-    }
     try {
       if (item.kind === "localOccurrence") await restoreRecentlyDeletedTodoOccurrence(item.id,item.occurrenceKey);
       else await restoreRecentlyDeletedTodo(item.id);
@@ -1411,16 +1425,13 @@
   function scheduleUndoDeletion(item: UndoDeletion) {
     undoQueue.enqueue(item);
   }
-  function stageRemoteDeletion(item: CalendarAgendaItem, calendar: CalendarSettingsView) {
-    const displayedItem = calendarItems.find((current) => current.resourceId === item.resourceId && remoteDeleteKey(current) === remoteDeleteKey(item));
-    const next = new Set(stagedRemoteDeleteKeys); next.add(remoteDeleteKey(item)); stagedRemoteDeleteKeys = next;
-    calendarItems = calendarItems.filter((current) => remoteDeleteKey(current) !== remoteDeleteKey(item));
-    resetDetailSelection();
-    scheduleUndoDeletion({ kind: "remote", id: remoteDeleteKey(item), title: displayedItem?.title ?? item.title, item, calendar });
+  async function stageRemoteDeletion(item: CalendarAgendaItem): Promise<boolean> {
+    try { presenter.accept(await stagePresentedRemoteDelete(item.resourceId)); resetDetailSelection(); return true; }
+    catch { void reportActionFailure("deleteAction", "deleteStage", "deletion could not be staged"); return false; }
   }
-  function finishStagedRemoteDeletion(item: CalendarAgendaItem) {
-    const next = new Set(stagedRemoteDeleteKeys); next.delete(remoteDeleteKey(item)); stagedRemoteDeleteKeys = next;
-    void refreshCalendar();
+  async function undoRemoteDeletion(id: string) {
+    try { presenter.accept(await undoPresentedRemoteDelete(id)); await refreshCalendar(); }
+    catch { void reportActionFailure("deleteAction", "deleteUndo", "deletion undo failed"); }
   }
 
   function clearMessages() { errorMessage = ""; errorLogAvailable = false; }
@@ -1545,6 +1556,7 @@
 
 <main class="shell" class:settings-view={currentView === "settings"} class:detail-open={detailModal !== null} class:rail-pinned={railPinnedOpen}>
   <ToastViewport>
+    {#each presentation.remoteDeletes.filter(d => d.phase === "undoable") as entry (entry.deletionId)}<UndoToast title={entry.item.title} undo={() => void undoRemoteDeletion(entry.deletionId)} {language} stacked />{/each}
     {#each undoItems as entry (entry.token)}<UndoToast title={entry.payload.title} undo={() => void undoDelete(entry.token)} {language} stacked />{/each}
     {#if actionToast}{#key actionToast.id}<ActionToast message={actionToast.message} variant={actionToast.variant} stacked />{/key}{/if}
   </ToastViewport>
@@ -1695,7 +1707,7 @@
   <section id="agenda-list" class="agenda" class:hide-time={!settingsMainShowTime} aria-labelledby="agenda-title" aria-busy={loading}>
     <div class="agenda-heading"><h2 id="agenda-title">{translate(language, "agenda")}</h2><span class="agenda-summary" aria-label={text("agendaSummaryAria", { pending: pendingCount, calendars: calendarItems.length, todos: todos.length })}>{text("timelineCount", { count: timelineEntries.length })}</span></div>
     {#if loading}<p class="loading-state">{translate(language, "loadingAgenda")}</p>
-    {:else if todos.length === 0 && calendarItems.length === 0}<div class="empty-state"><h3>{translate(language, "nothingToday")}</h3><p>{translate(language, "emptyAgendaHelp")}</p></div>
+    {:else if todos.length === 0 && calendarItems.length === 0 && createRows.length === 0}<div class="empty-state"><h3>{translate(language, "nothingToday")}</h3><p>{translate(language, "emptyAgendaHelp")}</p></div>
     {:else}
       <ul class="agenda-items timeline-items">
         {#snippet nowMarker()}
@@ -1718,8 +1730,9 @@
         {#if timelineEntries.length === 0}<li class="now-slot">{@render nowMarker()}</li>{/if}
       </ul>
       {#if timelineEntries.length === 0}<p class="timeline-empty">{translate(language, "noTimelineItems")}</p>{/if}
-      <div class="todo-heading agenda-heading"><h2>{text("todoCount", { count: filteredAgendaEntries.length })}</h2><IconButton class="reset-order-button" label={translate(language, "resetOrder")} size="compact" disabled={resettingOrder} onclick={resetOrder}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 0 1-15.64 6.08L3 16" /><path d="M3 21v-5h5" /><path d="M3 12a9 9 0 0 1 15.64-6.08L21 8" /><path d="M21 3v5h-5" /></svg></IconButton></div>
+      <div class="todo-heading agenda-heading"><h2>{text("todoCount", { count: filteredAgendaEntries.length + createRows.length })}</h2><IconButton class="reset-order-button" label={translate(language, "resetOrder")} size="compact" disabled={resettingOrder} onclick={resetOrder}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 0 1-15.64 6.08L3 16" /><path d="M3 21v-5h5" /><path d="M3 12a9 9 0 0 1 15.64-6.08L21 8" /><path d="M21 3v5h-5" /></svg></IconButton></div>
       <ul class="agenda-items todo-items">
+        <PresentedCreates items={createRows} {language} recover={recoverCreate} surface="main" showCalendarName={settingsMainShowCalendarName} showTime={settingsMainShowTime} showTags={settingsMainShowTags} formatTime={(item) => formatTime(item.draft.startAtUtcMs ?? item.draft.dueAtUtcMs)} />
         {#each filteredAgendaEntries as entry (entry.key)}
         <li tabindex="-1" data-key={entry.key} data-completion-motion-id={`main-list:${entry.key}`} data-completion-key={entry.key} class:dragging={draggingKey === entry.key} class:drop-target={!!draggingKey && dragTargetKey === entry.key && draggingKey !== entry.key} class:completed-entry={entry.item.completed} class:completion-finishing={completionChanges.get(entry.key) === "complete"} class:completion-restoring={completionChanges.get(entry.key) === "restore"} class:unsupported-event={entry.kind === "calendar" && entry.item.status === "unsupported"} oncontextmenu={(event) => openDeleteMenu(event, entry)} ondblclick={() => entry.kind === "calendar" ? openCalendarModal(entry.item) : openTodoModal(entry.item)}>
           <div class="todo-row">
@@ -1766,7 +1779,8 @@
         <fieldset disabled={detailSaving || remoteView?.busy || !!remoteBlockedReason(calendarSettings.find((calendar) => calendar.calendarId === item.calendarId), item) || !projectionCandidate(item)}>
           <div class="detail-title detail-field detail-title-editor" class:active-edit-field={activeDetailField === "title"} data-detail-field="title"><span class="detail-color" style:background={item.calendarColor ?? undefined} aria-hidden="true"></span><label class="sr-only" for="calendar-edit-title">{translate(language, "title")}</label><input id="calendar-edit-title" bind:value={editTitle} maxlength="512" required /></div>
           <div class="detail-field" class:active-edit-field={activeDetailField === "calendar"} data-detail-field="calendar"><label for="calendar-edit-calendar">{translate(language, "calendar")}</label><select id="calendar-edit-calendar" disabled><option>{item.calendarName}</option></select></div>
-          <div class="detail-field detail-time-fields" class:active-edit-field={activeDetailField === "time"} data-detail-field="time"><div><label for="calendar-edit-start">{translate(language, "start")}</label><DateTimeInput disabled={detailSaving} id="calendar-edit-start" value={editStart} step="1" onValue={(value) => { updateEditStart(value); scheduleDetailAutoSave(); }} {language} /></div><div><label for="calendar-edit-end">{translate(language, "end")}</label><DateTimeInput disabled={detailSaving} id="calendar-edit-end" value={editDue} step="1" onValue={(value) => { editDue = value; scheduleDetailAutoSave(); }} {language} /></div></div>
+          <div class="detail-field detail-time-fields" class:active-edit-field={activeDetailField === "time"} data-detail-field="time"><div><label for="calendar-edit-start">{translate(language, "start")}</label><DateTimeInput disabled={detailSaving || item.remoteTimeEditEligible === false} id="calendar-edit-start" value={editStart} step="1" onValue={(value) => { updateEditStart(value); scheduleDetailAutoSave(); }} {language} /></div><div><label for="calendar-edit-end">{translate(language, "end")}</label><DateTimeInput disabled={detailSaving || item.remoteTimeEditEligible === false} id="calendar-edit-end" value={editDue} step="1" onValue={(value) => { editDue = value; scheduleDetailAutoSave(); }} {language} /></div></div>
+          {#if item.remoteTimeEditEligible === false}<p class="field-help">{translate(language, "remoteTimeReadOnly")}</p>{/if}
           <div class="detail-field" class:active-edit-field={activeDetailField === "location"} data-detail-field="location"><label for="calendar-edit-location">{translate(language, "location")}</label><input id="calendar-edit-location" bind:value={editLocation} maxlength="512" /></div>
           <div class="detail-field" class:active-edit-field={activeDetailField === "notes"} data-detail-field="notes"><label for="calendar-edit-notes">{translate(language, "notes")}</label><textarea id="calendar-edit-notes" bind:value={editNotes} maxlength="10000" rows="3"></textarea></div>
         </fieldset>

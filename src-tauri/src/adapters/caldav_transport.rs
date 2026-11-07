@@ -512,6 +512,7 @@ impl DavTransportPolicy {
 
     /// Pure exact collection policy check for internally captured Probe evidence.
     /// This constructs no request and grants no executor or routing authority.
+    #[allow(dead_code)]
     pub(crate) fn probe_collection_matches(&self, entry: &Url, route: &str) -> bool {
         self.validate_destination(entry).is_ok()
             && entry
